@@ -53,6 +53,7 @@ export const api = {
   addTodo: (todo: { title: string; notes?: string; priority?: number; due_at?: string | null }) =>
     invoke<Todo>("add_todo", { todo }),
   setTodoDone: (id: number, done: boolean) => invoke<void>("set_todo_done", { id, done }),
+  setTodoPriority: (id: number, priority: number) => invoke<void>("set_todo_priority", { id, priority }),
   deleteTodo: (id: number) => invoke<void>("delete_todo", { id }),
 
   listReminders: () => invoke<Reminder[]>("list_reminders"),

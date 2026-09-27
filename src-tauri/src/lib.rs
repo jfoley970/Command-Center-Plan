@@ -39,6 +39,11 @@ fn set_todo_done(db: State<Db>, id: i64, done: bool) -> CmdResult<()> {
 }
 
 #[tauri::command]
+fn set_todo_priority(db: State<Db>, id: i64, priority: i64) -> CmdResult<()> {
+    db::set_todo_priority(&db.0.lock().unwrap(), id, priority).map_err(err)
+}
+
+#[tauri::command]
 fn delete_todo(db: State<Db>, id: i64) -> CmdResult<()> {
     db::delete_todo(&db.0.lock().unwrap(), id).map_err(err)
 }
@@ -270,6 +275,7 @@ pub fn run() {
             list_todos,
             add_todo,
             set_todo_done,
+            set_todo_priority,
             delete_todo,
             list_reminders,
             add_reminder,

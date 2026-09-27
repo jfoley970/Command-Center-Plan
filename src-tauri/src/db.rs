@@ -150,6 +150,11 @@ pub fn set_todo_done(conn: &Connection, id: i64, done: bool) -> rusqlite::Result
     Ok(())
 }
 
+pub fn set_todo_priority(conn: &Connection, id: i64, priority: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE todos SET priority = ?1 WHERE id = ?2", params![priority.clamp(1, 3), id])?;
+    Ok(())
+}
+
 pub fn delete_todo(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM todos WHERE id = ?1", [id])?;
     Ok(())

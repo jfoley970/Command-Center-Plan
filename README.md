@@ -4,7 +4,7 @@ A desktop app for Mac and Windows that brings your day and your AI agents into o
 
 ## What's in milestone 1
 
-- **Home dashboard:** open, overdue and due-today todos, today's reminders, agent runs, and a "Plan my day" button.
+- **Interactive dashboard (dark theme):** a capture bar, clickable stat tiles, a live timeline of today's reminders and due todos, and widgets for todos, reminders, an agent console, a 7-day completion chart and upcoming connections. Drag a widget by its title to move it, drag its corner to resize it, and the layout is remembered. Most work happens in place, without leaving the dashboard.
 - **Quick actions:** press `Ctrl/Cmd + K` in the app, or `Ctrl/Cmd + Shift + Space` from anywhere. Type any text to add it as a todo, set a reminder for 30 minutes or tomorrow at 9 AM, or run an agent with it.
 - **Todos:** priority, optional due date, completion history.
 - **Reminders:** one-off, daily or weekly, shown as desktop notifications. Closing the window keeps the app in the system tray so reminders still fire.
@@ -38,7 +38,9 @@ src/                 React frontend
   App.tsx            shell, navigation, quick-action palette
   data.tsx           shared data store, refreshes on backend events
   api.ts             typed wrappers for backend commands
-  pages/             Home, Todos, Reminders, Agents, Settings
+  pages/             Dashboard, Todos, Reminders, Agents, Settings
+  widgets/           dashboard widgets (timeline, todos, reminders, agent console, trend…)
+  quick.ts           quick actions shared by the capture bar and palette
 src-tauri/src/
   lib.rs             commands, tray, global shortcut, reminder loop
   db.rs              SQLite schema and queries (with tests)
