@@ -5,13 +5,14 @@ import { api } from "./api";
 import { DataProvider, useData } from "./data";
 import { minutesFromNow, quick, tomorrowAt9 } from "./quick";
 import Dashboard from "./pages/Dashboard";
+import Projects from "./pages/Projects";
 import Todos from "./pages/Todos";
 import Reminders from "./pages/Reminders";
 import Agents from "./pages/Agents";
 import Settings from "./pages/Settings";
 import "./styles.css";
 
-export type Page = "dashboard" | "todos" | "reminders" | "agents" | "settings";
+export type Page = "dashboard" | "projects" | "todos" | "reminders" | "agents" | "settings";
 
 const icon = (d: ReactNode) => (
   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -21,6 +22,7 @@ const icon = (d: ReactNode) => (
 
 const NAV: { id: Page; label: string; icon: ReactNode }[] = [
   { id: "dashboard", label: "Dashboard", icon: icon(<><rect x="3" y="3" width="7" height="9" rx="1.5" /><rect x="14" y="3" width="7" height="5" rx="1.5" /><rect x="14" y="12" width="7" height="9" rx="1.5" /><rect x="3" y="16" width="7" height="5" rx="1.5" /></>) },
+  { id: "projects", label: "Projects", icon: icon(<><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></>) },
   { id: "todos", label: "Todos", icon: icon(<><path d="M9 6h11M9 12h11M9 18h11" /><path d="m3.5 6 1.5 1.5L7.5 5M3.5 12l1.5 1.5L7.5 11M3.5 18l1.5 1.5L7.5 17" /></>) },
   { id: "reminders", label: "Reminders", icon: icon(<><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></>) },
   { id: "agents", label: "Agents", icon: icon(<><rect x="4" y="7" width="16" height="12" rx="3" /><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6" /></>) },
@@ -39,6 +41,7 @@ function Shell() {
   const { error, setError } = useData();
   const [page, setPage] = useState<Page>("dashboard");
   const [agentId, setAgentId] = useState<number | null>(null);
+  const [projectId, setProjectId] = useState<number | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   useEffect(() => {
@@ -87,6 +90,7 @@ function Shell() {
           </div>
         )}
         {page === "dashboard" && <Dashboard go={setPage} />}
+        {page === "projects" && <Projects selectedId={projectId} onSelect={setProjectId} />}
         {page === "todos" && <Todos />}
         {page === "reminders" && <Reminders />}
         {page === "agents" && <Agents selectedId={agentId} onSelect={setAgentId} />}

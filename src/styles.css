@@ -290,6 +290,15 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 .agent-list li { cursor: pointer; border-radius: 6px; padding-left: 0.5rem; }
 .agent-list li.active { background: var(--panel-2); font-weight: 600; }
 .run { display: flex; flex-direction: column; gap: 0.4rem; }
+
+/* ---------- Projects page ---------- */
+.dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.dot.lg { width: 14px; height: 14px; }
+.swatch { width: 24px; height: 24px; padding: 0; border-radius: 50%; border: 2px solid transparent; }
+.swatch.active { border-color: var(--text); }
+.progress { height: 6px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.progress span { display: block; height: 100%; border-radius: 999px; transition: width 0.3s; }
+.project-tag { display: inline-flex; align-items: center; gap: 0.35rem; }
 .run-input { font-style: italic; color: var(--muted); }
 
 /* ---------- Quick action palette (cmdk) ---------- */

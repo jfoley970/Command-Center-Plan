@@ -4,17 +4,18 @@ import { useData } from "../data";
 import { formatWhen, fromLocalInput, isOverdue } from "../time";
 
 export default function Todos() {
-  const { todos, act } = useData();
+  const { todos, projects, act } = useData();
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(2);
   const [due, setDue] = useState("");
+  const [projectId, setProjectId] = useState("");
   const [showDone, setShowDone] = useState(false);
 
   async function add(e: FormEvent) {
     e.preventDefault();
     if (!title.trim()) return;
     const saved = await act(() =>
-      api.addTodo({ title, priority, due_at: due ? fromLocalInput(due) : null }),
+      api.addTodo({ title, priority, due_at: due ? fromLocalInput(due) : null, project_id: projectId ? Number(projectId) : null }),
     );
     if (saved) {
       setTitle("");
@@ -22,6 +23,9 @@ export default function Todos() {
       setPriority(2);
     }
   }
+
+  const projectOf = (id: number | null) => projects.find((p) => p.id === id);
+  const activeProjects = projects.filter((p) => !p.archived);
 
   const open = todos.filter((t) => !t.done);
   const done = todos.filter((t) => t.done);
@@ -50,6 +54,14 @@ export default function Todos() {
           <option value={3}>Low</option>
         </select>
         <input type="datetime-local" value={due} onChange={(e) => setDue(e.target.value)} aria-label="Due" />
+        {activeProjects.length > 0 && (
+          <select value={projectId} onChange={(e) => setProjectId(e.target.value)} aria-label="Project">
+            <option value="">No project</option>
+            {activeProjects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        )}
         <button className="primary" type="submit">Add</button>
       </form>
 
@@ -61,6 +73,12 @@ export default function Todos() {
               <input type="checkbox" checked={t.done} onChange={() => act(() => api.setTodoDone(t.id, !t.done))} />
               <span className={`prio p${t.priority}`} title={["", "High", "Normal", "Low"][t.priority]} />
               <span className="grow">{t.title}</span>
+              {projectOf(t.project_id) && (
+                <span className="tag project-tag">
+                  <span className="dot" style={{ background: projectOf(t.project_id)!.color }} />
+                  {projectOf(t.project_id)!.name}
+                </span>
+              )}
               {t.due_at && <span className={!t.done && isOverdue(t.due_at) ? "tag bad" : "tag"}>{formatWhen(t.due_at)}</span>}
               <button className="ghost" onClick={() => act(() => api.deleteTodo(t.id))} aria-label="Delete">
                 ✕

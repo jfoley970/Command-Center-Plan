@@ -10,6 +10,7 @@ export type Todo = {
   done: boolean;
   created_at: string;
   done_at: string | null;
+  project_id: number | null;
 };
 
 export type Repeat = "none" | "daily" | "weekly";
@@ -20,6 +21,16 @@ export type Reminder = {
   remind_at: string;
   repeat: Repeat;
   fired: boolean;
+  created_at: string;
+  project_id: number | null;
+};
+
+export type Project = {
+  id: number;
+  name: string;
+  description: string;
+  color: string;
+  archived: boolean;
   created_at: string;
 };
 
@@ -50,17 +61,22 @@ export type ModelOption = { id: string; label: string };
 
 export const api = {
   listTodos: () => invoke<Todo[]>("list_todos"),
-  addTodo: (todo: { title: string; notes?: string; priority?: number; due_at?: string | null }) =>
+  addTodo: (todo: { title: string; notes?: string; priority?: number; due_at?: string | null; project_id?: number | null }) =>
     invoke<Todo>("add_todo", { todo }),
   setTodoDone: (id: number, done: boolean) => invoke<void>("set_todo_done", { id, done }),
   setTodoPriority: (id: number, priority: number) => invoke<void>("set_todo_priority", { id, priority }),
   deleteTodo: (id: number) => invoke<void>("delete_todo", { id }),
 
   listReminders: () => invoke<Reminder[]>("list_reminders"),
-  addReminder: (reminder: { title: string; remind_at: string; repeat: Repeat }) =>
+  addReminder: (reminder: { title: string; remind_at: string; repeat: Repeat; project_id?: number | null }) =>
     invoke<Reminder>("add_reminder", { reminder }),
   deleteReminder: (id: number) => invoke<void>("delete_reminder", { id }),
   snoozeReminder: (id: number, minutes: number) => invoke<void>("snooze_reminder", { id, minutes }),
+
+  listProjects: () => invoke<Project[]>("list_projects"),
+  saveProject: (project: Omit<Project, "id" | "created_at"> & { id?: number }) =>
+    invoke<Project>("save_project", { project }),
+  deleteProject: (id: number) => invoke<void>("delete_project", { id }),
 
   listModels: () => invoke<ModelOption[]>("list_models"),
   listAgents: () => invoke<Agent[]>("list_agents"),

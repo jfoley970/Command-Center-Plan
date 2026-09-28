@@ -73,6 +73,26 @@ fn snooze_reminder(db: State<Db>, id: i64, minutes: i64) -> CmdResult<()> {
     db::snooze_reminder(&db.0.lock().unwrap(), id, minutes.max(1)).map_err(err)
 }
 
+// ---------- Projects ----------
+
+#[tauri::command]
+fn list_projects(db: State<Db>) -> CmdResult<Vec<db::Project>> {
+    db::list_projects(&db.0.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+fn save_project(db: State<Db>, project: db::ProjectInput) -> CmdResult<db::Project> {
+    if project.name.trim().is_empty() {
+        return Err("A project needs a name.".into());
+    }
+    db::save_project(&db.0.lock().unwrap(), project).map_err(err)
+}
+
+#[tauri::command]
+fn delete_project(db: State<Db>, id: i64) -> CmdResult<()> {
+    db::delete_project(&db.0.lock().unwrap(), id).map_err(err)
+}
+
 // ---------- Agents ----------
 
 #[derive(Serialize)]
@@ -113,10 +133,16 @@ fn list_runs(db: State<Db>, agent_id: Option<i64>, limit: Option<i64>) -> CmdRes
 fn day_context(conn: &rusqlite::Connection) -> CmdResult<String> {
     let todos = db::list_todos(conn).map_err(err)?;
     let reminders = db::list_reminders(conn).map_err(err)?;
+    let projects = db::list_projects(conn).map_err(err)?;
+    let project_name = |id: Option<i64>| {
+        id.and_then(|id| projects.iter().find(|p| p.id == id))
+            .map(|p| format!(" [project: {}]", p.name))
+            .unwrap_or_default()
+    };
     let mut s = format!("Current time: {}\n\nOpen todos:\n", chrono::Local::now().format("%A %Y-%m-%d %H:%M"));
     for t in todos.iter().filter(|t| !t.done) {
         let due = t.due_at.as_deref().map(|d| format!(" (due {d})")).unwrap_or_default();
-        s.push_str(&format!("- [P{}] {}{}\n", t.priority, t.title, due));
+        s.push_str(&format!("- [P{}] {}{}{}\n", t.priority, t.title, due, project_name(t.project_id)));
     }
     s.push_str("\nUpcoming reminders:\n");
     for r in reminders.iter().filter(|r| !r.fired) {
@@ -281,6 +307,9 @@ pub fn run() {
             add_reminder,
             delete_reminder,
             snooze_reminder,
+            list_projects,
+            save_project,
+            delete_project,
             list_models,
             list_agents,
             save_agent,

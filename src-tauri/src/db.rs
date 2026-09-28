@@ -1,4 +1,4 @@
-//! Local SQLite storage for todos, reminders, agents and agent runs.
+//! Local SQLite storage for projects, todos, reminders, agents and agent runs.
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS reminders (
     remind_at   TEXT NOT NULL,               -- RFC 3339
     repeat      TEXT NOT NULL DEFAULT 'none',-- none | daily | weekly
     fired       INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS projects (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    color       TEXT NOT NULL DEFAULT '#4c8dff',
+    archived    INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS agents (
@@ -53,6 +61,7 @@ impl Db {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         seed_default_agent(&conn)?;
         Ok(Db(Mutex::new(conn)))
     }
@@ -60,6 +69,24 @@ impl Db {
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(names.iter().any(|n| n == column))
+}
+
+/// Adds columns introduced after the first release to existing databases.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    for table in ["todos", "reminders"] {
+        if !has_column(conn, table, "project_id")? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL"
+            ))?;
+        }
+    }
+    Ok(())
 }
 
 fn seed_default_agent(conn: &Connection) -> rusqlite::Result<()> {
@@ -93,6 +120,7 @@ pub struct Todo {
     pub done: bool,
     pub created_at: String,
     pub done_at: Option<String>,
+    pub project_id: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -103,6 +131,8 @@ pub struct NewTodo {
     #[serde(default = "default_priority")]
     pub priority: i64,
     pub due_at: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<i64>,
 }
 
 fn default_priority() -> i64 {
@@ -119,10 +149,11 @@ fn todo_from_row(r: &Row) -> rusqlite::Result<Todo> {
         done: r.get::<_, i64>(5)? != 0,
         created_at: r.get(6)?,
         done_at: r.get(7)?,
+        project_id: r.get(8)?,
     })
 }
 
-const TODO_COLS: &str = "id, title, notes, priority, due_at, done, created_at, done_at";
+const TODO_COLS: &str = "id, title, notes, priority, due_at, done, created_at, done_at, project_id";
 
 pub fn list_todos(conn: &Connection) -> rusqlite::Result<Vec<Todo>> {
     let mut stmt = conn.prepare(&format!(
@@ -134,8 +165,8 @@ pub fn list_todos(conn: &Connection) -> rusqlite::Result<Vec<Todo>> {
 
 pub fn add_todo(conn: &Connection, t: NewTodo) -> rusqlite::Result<Todo> {
     conn.execute(
-        "INSERT INTO todos (title, notes, priority, due_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![t.title.trim(), t.notes, t.priority.clamp(1, 3), t.due_at, now()],
+        "INSERT INTO todos (title, notes, priority, due_at, created_at, project_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![t.title.trim(), t.notes, t.priority.clamp(1, 3), t.due_at, now(), t.project_id],
     )?;
     let id = conn.last_insert_rowid();
     conn.query_row(&format!("SELECT {TODO_COLS} FROM todos WHERE id = ?1"), [id], todo_from_row)
@@ -170,6 +201,7 @@ pub struct Reminder {
     pub repeat: String,
     pub fired: bool,
     pub created_at: String,
+    pub project_id: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -178,6 +210,8 @@ pub struct NewReminder {
     pub remind_at: String,
     #[serde(default = "default_repeat")]
     pub repeat: String,
+    #[serde(default)]
+    pub project_id: Option<i64>,
 }
 
 fn default_repeat() -> String {
@@ -192,10 +226,11 @@ fn reminder_from_row(r: &Row) -> rusqlite::Result<Reminder> {
         repeat: r.get(3)?,
         fired: r.get::<_, i64>(4)? != 0,
         created_at: r.get(5)?,
+        project_id: r.get(6)?,
     })
 }
 
-const REMINDER_COLS: &str = "id, title, remind_at, repeat, fired, created_at";
+const REMINDER_COLS: &str = "id, title, remind_at, repeat, fired, created_at, project_id";
 
 pub fn list_reminders(conn: &Connection) -> rusqlite::Result<Vec<Reminder>> {
     let mut stmt = conn.prepare(&format!(
@@ -214,8 +249,8 @@ pub fn add_reminder(conn: &Connection, r: NewReminder) -> Result<Reminder, Strin
         other => return Err(format!("Unknown repeat value: {other}")),
     };
     conn.execute(
-        "INSERT INTO reminders (title, remind_at, repeat, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![r.title.trim(), at.to_rfc3339(), repeat, now()],
+        "INSERT INTO reminders (title, remind_at, repeat, created_at, project_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![r.title.trim(), at.to_rfc3339(), repeat, now(), r.project_id],
     )
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
@@ -277,6 +312,81 @@ pub fn take_due_reminders(conn: &Connection) -> rusqlite::Result<Vec<Reminder>> 
         }
     }
     Ok(due)
+}
+
+// ---------- Projects ----------
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Project {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub color: String,
+    pub archived: bool,
+    pub created_at: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ProjectInput {
+    pub id: Option<i64>,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_color")]
+    pub color: String,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+fn default_color() -> String {
+    "#4c8dff".into()
+}
+
+fn project_from_row(r: &Row) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        description: r.get(2)?,
+        color: r.get(3)?,
+        archived: r.get::<_, i64>(4)? != 0,
+        created_at: r.get(5)?,
+    })
+}
+
+const PROJECT_COLS: &str = "id, name, description, color, archived, created_at";
+
+pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {PROJECT_COLS} FROM projects ORDER BY archived ASC, name COLLATE NOCASE"
+    ))?;
+    let rows = stmt.query_map([], project_from_row)?;
+    rows.collect()
+}
+
+pub fn save_project(conn: &Connection, p: ProjectInput) -> rusqlite::Result<Project> {
+    let id = match p.id {
+        Some(id) => {
+            conn.execute(
+                "UPDATE projects SET name = ?1, description = ?2, color = ?3, archived = ?4 WHERE id = ?5",
+                params![p.name.trim(), p.description, p.color, p.archived as i64, id],
+            )?;
+            id
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO projects (name, description, color, archived, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![p.name.trim(), p.description, p.color, p.archived as i64, now()],
+            )?;
+            conn.last_insert_rowid()
+        }
+    };
+    conn.query_row(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"), [id], project_from_row)
+}
+
+/// Deletes a project. Its tasks and reminders are kept, unassigned.
+pub fn delete_project(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 // ---------- Agents ----------
@@ -435,14 +545,38 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn.execute_batch(SCHEMA).unwrap();
+        migrate(&conn).unwrap();
         seed_default_agent(&conn).unwrap();
         conn
     }
 
     #[test]
+    fn project_tasks_survive_project_delete() {
+        let c = mem();
+        let p = save_project(&c, ProjectInput { id: None, name: " Website ".into(), description: "".into(), color: default_color(), archived: false }).unwrap();
+        assert_eq!(p.name, "Website");
+        let t = add_todo(&c, NewTodo { title: "Draft copy".into(), notes: "".into(), priority: 2, due_at: None, project_id: Some(p.id) }).unwrap();
+        assert_eq!(t.project_id, Some(p.id));
+        delete_project(&c, p.id).unwrap();
+        assert!(list_projects(&c).unwrap().is_empty());
+        assert_eq!(list_todos(&c).unwrap()[0].project_id, None);
+    }
+
+    #[test]
+    fn migrates_existing_database() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT); CREATE TABLE reminders (id INTEGER PRIMARY KEY, title TEXT);").unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        migrate(&c).unwrap();
+        assert!(has_column(&c, "todos", "project_id").unwrap());
+        assert!(has_column(&c, "reminders", "project_id").unwrap());
+        migrate(&c).unwrap();
+    }
+
+    #[test]
     fn todos_roundtrip() {
         let c = mem();
-        let t = add_todo(&c, NewTodo { title: " Call lab ".into(), notes: "".into(), priority: 9, due_at: None }).unwrap();
+        let t = add_todo(&c, NewTodo { title: " Call lab ".into(), notes: "".into(), priority: 9, due_at: None, project_id: None }).unwrap();
         assert_eq!(t.title, "Call lab");
         assert_eq!(t.priority, 3);
         set_todo_done(&c, t.id, true).unwrap();
@@ -455,7 +589,7 @@ mod tests {
     fn one_off_reminder_fires_once() {
         let c = mem();
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
-        add_reminder(&c, NewReminder { title: "x".into(), remind_at: past, repeat: "none".into() }).unwrap();
+        add_reminder(&c, NewReminder { title: "x".into(), remind_at: past, repeat: "none".into(), project_id: None }).unwrap();
         assert_eq!(take_due_reminders(&c).unwrap().len(), 1);
         assert_eq!(take_due_reminders(&c).unwrap().len(), 0);
         assert!(list_reminders(&c).unwrap()[0].fired);
@@ -465,7 +599,7 @@ mod tests {
     fn daily_reminder_rolls_forward() {
         let c = mem();
         let past = (chrono::Utc::now() - chrono::Duration::days(3)).to_rfc3339();
-        add_reminder(&c, NewReminder { title: "x".into(), remind_at: past, repeat: "daily".into() }).unwrap();
+        add_reminder(&c, NewReminder { title: "x".into(), remind_at: past, repeat: "daily".into(), project_id: None }).unwrap();
         assert_eq!(take_due_reminders(&c).unwrap().len(), 1);
         let r = &list_reminders(&c).unwrap()[0];
         assert!(!r.fired);
@@ -477,9 +611,9 @@ mod tests {
     #[test]
     fn rejects_bad_reminder_input() {
         let c = mem();
-        assert!(add_reminder(&c, NewReminder { title: "x".into(), remind_at: "tomorrow".into(), repeat: "none".into() }).is_err());
+        assert!(add_reminder(&c, NewReminder { title: "x".into(), remind_at: "tomorrow".into(), repeat: "none".into(), project_id: None }).is_err());
         let t = chrono::Utc::now().to_rfc3339();
-        assert!(add_reminder(&c, NewReminder { title: "x".into(), remind_at: t, repeat: "hourly".into() }).is_err());
+        assert!(add_reminder(&c, NewReminder { title: "x".into(), remind_at: t, repeat: "hourly".into(), project_id: None }).is_err());
     }
 
     #[test]
