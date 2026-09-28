@@ -1,5 +1,6 @@
 mod claude;
 mod db;
+mod mail;
 mod secrets;
 
 use db::Db;
@@ -91,6 +92,120 @@ fn save_project(db: State<Db>, project: db::ProjectInput) -> CmdResult<db::Proje
 #[tauri::command]
 fn delete_project(db: State<Db>, id: i64) -> CmdResult<()> {
     db::delete_project(&db.0.lock().unwrap(), id).map_err(err)
+}
+
+// ---------- Mail ----------
+
+#[derive(Serialize)]
+struct MailSetup {
+    client_id: String,
+    tenant_id: String,
+}
+
+#[tauri::command]
+fn get_mail_setup(db: State<Db>) -> CmdResult<MailSetup> {
+    let conn = db.0.lock().unwrap();
+    Ok(MailSetup {
+        client_id: db::get_setting(&conn, "ms_client_id").map_err(err)?.unwrap_or_default(),
+        tenant_id: db::get_setting(&conn, "ms_tenant_id").map_err(err)?.unwrap_or_default(),
+    })
+}
+
+/// Opens Microsoft sign-in in the browser and connects the inbox that signs in.
+#[tauri::command]
+async fn connect_microsoft(app: AppHandle, client_id: String, tenant_id: String) -> CmdResult<db::MailAccount> {
+    use tauri_plugin_opener::OpenerExt;
+    let (client_id, tenant_id) = (client_id.trim().to_string(), tenant_id.trim().to_string());
+    if client_id.is_empty() || tenant_id.is_empty() {
+        return Err("Enter the Application (client) ID and Directory (tenant) ID first.".into());
+    }
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::set_setting(&conn, "ms_client_id", &client_id).map_err(err)?;
+        db::set_setting(&conn, "ms_tenant_id", &tenant_id).map_err(err)?;
+    }
+    let pending = mail::begin_sign_in(&client_id, &tenant_id)?;
+    app.opener().open_url(pending.auth_url.clone(), None::<&str>).map_err(|e| format!("Could not open the browser: {e}"))?;
+    let signed_in = mail::finish_sign_in(pending, client_id.clone(), tenant_id.clone()).await?;
+    secrets::set_mail_token(&signed_in.email, &signed_in.refresh_token)?;
+    let account = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let id = db::upsert_account(&conn, &signed_in.email, &signed_in.display_name, &client_id, &tenant_id).map_err(err)?;
+        db::get_account(&conn, id).map_err(err)?.ok_or("The inbox could not be saved.")?
+    };
+    show_main(&app);
+    let _ = app.emit("mail-changed", ());
+    let sync_app = app.clone();
+    let id = account.id;
+    tauri::async_runtime::spawn(async move {
+        let _ = mail::sync_account(&sync_app, id).await;
+        let _ = sync_app.emit("mail-changed", ());
+    });
+    Ok(account)
+}
+
+#[tauri::command]
+fn list_mail_accounts(db: State<Db>) -> CmdResult<Vec<db::MailAccount>> {
+    db::list_accounts(&db.0.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+fn list_emails(db: State<Db>, account_id: i64) -> CmdResult<Vec<db::Email>> {
+    db::list_emails(&db.0.lock().unwrap(), account_id, 50).map_err(err)
+}
+
+#[tauri::command]
+async fn sync_mail(app: AppHandle, account_id: i64) -> CmdResult<usize> {
+    let result = mail::sync_account(&app, account_id).await;
+    let _ = app.emit("mail-changed", ());
+    result
+}
+
+#[tauri::command]
+fn disconnect_mail(db: State<Db>, account_id: i64) -> CmdResult<()> {
+    let conn = db.0.lock().unwrap();
+    if let Some(a) = db::get_account(&conn, account_id).map_err(err)? {
+        secrets::delete_mail_token(&a.email)?;
+    }
+    db::delete_account(&conn, account_id).map_err(err)
+}
+
+#[tauri::command]
+fn list_suggestions(db: State<Db>) -> CmdResult<Vec<db::Suggestion>> {
+    db::list_pending_suggestions(&db.0.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+fn accept_suggestion(db: State<Db>, suggestion: db::AcceptSuggestion) -> CmdResult<()> {
+    db::accept_suggestion(&db.0.lock().unwrap(), suggestion)
+}
+
+#[tauri::command]
+fn dismiss_suggestion(db: State<Db>, id: i64) -> CmdResult<()> {
+    db::dismiss_suggestion(&db.0.lock().unwrap(), id).map_err(err)
+}
+
+/// Syncs every connected inbox shortly after launch and then every 15 minutes.
+fn start_mail_loop(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        loop {
+            let ids: Vec<i64> = {
+                let state = app.state::<Db>();
+                let conn = state.0.lock().unwrap();
+                db::list_accounts(&conn).map(|a| a.into_iter().map(|a| a.id).collect()).unwrap_or_default()
+            };
+            for id in ids {
+                if let Err(e) = mail::sync_account(&app, id).await {
+                    eprintln!("mail sync failed: {e}");
+                }
+            }
+            let _ = app.emit("mail-changed", ());
+            tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+        }
+    });
 }
 
 // ---------- Agents ----------
@@ -288,6 +403,7 @@ pub fn run() {
             }
 
             start_reminder_loop(app.handle().clone());
+            start_mail_loop(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -310,6 +426,15 @@ pub fn run() {
             list_projects,
             save_project,
             delete_project,
+            get_mail_setup,
+            connect_microsoft,
+            list_mail_accounts,
+            list_emails,
+            sync_mail,
+            disconnect_mail,
+            list_suggestions,
+            accept_suggestion,
+            dismiss_suggestion,
             list_models,
             list_agents,
             save_agent,

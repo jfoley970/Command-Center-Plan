@@ -51,13 +51,17 @@ struct ApiErrorDetail {
     message: String,
 }
 
-fn request_body(model: &str, system: &str, user: &str) -> serde_json::Value {
+fn request_body(model: &str, system: &str, user: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
     let mut body = json!({
         "model": model,
         "max_tokens": 16000,
         "system": system,
         "messages": [{ "role": "user", "content": user }],
     });
+    // Structured outputs: the reply is guaranteed to be JSON matching the schema.
+    if let Some(schema) = schema {
+        body["output_config"] = json!({ "format": { "type": "json_schema", "schema": schema } });
+    }
     // Server-side fallbacks are supported on the Opus 5 / Fable tiers only.
     if model.starts_with("claude-opus-5") || model.starts_with("claude-fable") {
         body["fallbacks"] = json!("default");
@@ -66,7 +70,28 @@ fn request_body(model: &str, system: &str, user: &str) -> serde_json::Value {
 }
 
 pub async fn complete(api_key: &str, model: &str, system: &str, user: &str) -> Result<Completion, String> {
-    let body = request_body(model, system, user);
+    send(api_key, request_body(model, system, user, None)).await
+}
+
+/// Like `complete`, but constrains the reply to `schema` and parses it.
+pub async fn complete_json<T: serde::de::DeserializeOwned>(
+    api_key: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    schema: &serde_json::Value,
+) -> Result<(T, Completion), String> {
+    let c = send(api_key, request_body(model, system, user, Some(schema))).await?;
+    match c.stop_reason.as_str() {
+        "refusal" => return Err(c.text),
+        "max_tokens" => return Err("Claude's reply was cut off before it finished.".into()),
+        _ => {}
+    }
+    let parsed = serde_json::from_str(&c.text).map_err(|e| format!("Claude returned JSON in an unexpected shape: {e}"))?;
+    Ok((parsed, c))
+}
+
+async fn send(api_key: &str, body: serde_json::Value) -> Result<Completion, String> {
     let mut req = reqwest::Client::new()
         .post(API_URL)
         .header("x-api-key", api_key)
@@ -128,15 +153,24 @@ mod tests {
 
     #[test]
     fn opus_requests_carry_fallbacks() {
-        let b = request_body("claude-opus-5", "sys", "hi");
+        let b = request_body("claude-opus-5", "sys", "hi", None);
         assert_eq!(b["fallbacks"], "default");
         assert_eq!(b["messages"][0]["content"], "hi");
         assert!(b.get("thinking").is_none());
+        assert!(b.get("output_config").is_none());
     }
 
     #[test]
     fn other_models_do_not() {
-        assert!(request_body("claude-sonnet-5", "s", "u").get("fallbacks").is_none());
-        assert!(request_body("claude-haiku-4-5", "s", "u").get("fallbacks").is_none());
+        assert!(request_body("claude-sonnet-5", "s", "u", None).get("fallbacks").is_none());
+        assert!(request_body("claude-haiku-4-5", "s", "u", None).get("fallbacks").is_none());
+    }
+
+    #[test]
+    fn schema_goes_in_output_config() {
+        let schema = json!({ "type": "object", "properties": {}, "additionalProperties": false });
+        let b = request_body("claude-opus-5", "s", "u", Some(&schema));
+        assert_eq!(b["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(b["output_config"]["format"]["schema"], schema);
     }
 }

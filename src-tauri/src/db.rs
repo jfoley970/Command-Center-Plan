@@ -34,6 +34,50 @@ CREATE TABLE IF NOT EXISTS projects (
     archived    INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mail_accounts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    email        TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL DEFAULT '',
+    client_id    TEXT NOT NULL,
+    tenant_id    TEXT NOT NULL,
+    summary      TEXT NOT NULL DEFAULT '',
+    summary_at   TEXT,
+    last_sync_at TEXT,
+    last_error   TEXT,
+    created_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS emails (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    remote_id   TEXT NOT NULL,
+    subject     TEXT NOT NULL DEFAULT '',
+    from_name   TEXT NOT NULL DEFAULT '',
+    from_addr   TEXT NOT NULL DEFAULT '',
+    received_at TEXT NOT NULL,
+    preview     TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    is_read     INTEGER NOT NULL DEFAULT 0,
+    web_link    TEXT NOT NULL DEFAULT '',
+    analyzed    INTEGER NOT NULL DEFAULT 0,  -- 1 once Claude has looked for tasks in it
+    UNIQUE (account_id, remote_id)
+);
+CREATE TABLE IF NOT EXISTS suggestions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    email_id    INTEGER REFERENCES emails(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,               -- todo | reminder
+    title       TEXT NOT NULL,
+    notes       TEXT NOT NULL DEFAULT '',
+    due_at      TEXT,                        -- RFC 3339; the reminder time for reminders
+    priority    INTEGER NOT NULL DEFAULT 2,
+    project_id  INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    status      TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | dismissed
+    created_at  TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS agents (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL,
@@ -85,6 +129,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 "ALTER TABLE {table} ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL"
             ))?;
         }
+        if !has_column(conn, table, "email_id")? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN email_id INTEGER REFERENCES emails(id) ON DELETE SET NULL"
+            ))?;
+        }
     }
     Ok(())
 }
@@ -121,6 +170,7 @@ pub struct Todo {
     pub created_at: String,
     pub done_at: Option<String>,
     pub project_id: Option<i64>,
+    pub email_id: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -150,10 +200,11 @@ fn todo_from_row(r: &Row) -> rusqlite::Result<Todo> {
         created_at: r.get(6)?,
         done_at: r.get(7)?,
         project_id: r.get(8)?,
+        email_id: r.get(9)?,
     })
 }
 
-const TODO_COLS: &str = "id, title, notes, priority, due_at, done, created_at, done_at, project_id";
+const TODO_COLS: &str = "id, title, notes, priority, due_at, done, created_at, done_at, project_id, email_id";
 
 pub fn list_todos(conn: &Connection) -> rusqlite::Result<Vec<Todo>> {
     let mut stmt = conn.prepare(&format!(
@@ -202,6 +253,7 @@ pub struct Reminder {
     pub fired: bool,
     pub created_at: String,
     pub project_id: Option<i64>,
+    pub email_id: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -227,10 +279,11 @@ fn reminder_from_row(r: &Row) -> rusqlite::Result<Reminder> {
         fired: r.get::<_, i64>(4)? != 0,
         created_at: r.get(5)?,
         project_id: r.get(6)?,
+        email_id: r.get(7)?,
     })
 }
 
-const REMINDER_COLS: &str = "id, title, remind_at, repeat, fired, created_at, project_id";
+const REMINDER_COLS: &str = "id, title, remind_at, repeat, fired, created_at, project_id, email_id";
 
 pub fn list_reminders(conn: &Connection) -> rusqlite::Result<Vec<Reminder>> {
     let mut stmt = conn.prepare(&format!(
@@ -386,6 +439,303 @@ pub fn save_project(conn: &Connection, p: ProjectInput) -> rusqlite::Result<Proj
 /// Deletes a project. Its tasks and reminders are kept, unassigned.
 pub fn delete_project(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+// ---------- Settings ----------
+
+pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+// ---------- Mail ----------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct MailAccount {
+    pub id: i64,
+    pub email: String,
+    pub display_name: String,
+    pub client_id: String,
+    pub tenant_id: String,
+    pub summary: String,
+    pub summary_at: Option<String>,
+    pub last_sync_at: Option<String>,
+    pub last_error: Option<String>,
+    pub unread: i64,
+    pub pending: i64,
+}
+
+const ACCOUNT_SELECT: &str = "SELECT a.id, a.email, a.display_name, a.client_id, a.tenant_id, a.summary, a.summary_at,
+        a.last_sync_at, a.last_error,
+        (SELECT COUNT(*) FROM emails e WHERE e.account_id = a.id AND e.is_read = 0),
+        (SELECT COUNT(*) FROM suggestions s WHERE s.account_id = a.id AND s.status = 'pending')
+     FROM mail_accounts a";
+
+fn account_from_row(r: &Row) -> rusqlite::Result<MailAccount> {
+    Ok(MailAccount {
+        id: r.get(0)?,
+        email: r.get(1)?,
+        display_name: r.get(2)?,
+        client_id: r.get(3)?,
+        tenant_id: r.get(4)?,
+        summary: r.get(5)?,
+        summary_at: r.get(6)?,
+        last_sync_at: r.get(7)?,
+        last_error: r.get(8)?,
+        unread: r.get(9)?,
+        pending: r.get(10)?,
+    })
+}
+
+pub fn list_accounts(conn: &Connection) -> rusqlite::Result<Vec<MailAccount>> {
+    let mut stmt = conn.prepare(&format!("{ACCOUNT_SELECT} ORDER BY a.email"))?;
+    let rows = stmt.query_map([], account_from_row)?;
+    rows.collect()
+}
+
+pub fn get_account(conn: &Connection, id: i64) -> rusqlite::Result<Option<MailAccount>> {
+    conn.query_row(&format!("{ACCOUNT_SELECT} WHERE a.id = ?1"), [id], account_from_row).optional()
+}
+
+/// Adds an account, or updates its app registration if it is signed in again.
+pub fn upsert_account(conn: &Connection, email: &str, display_name: &str, client_id: &str, tenant_id: &str) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO mail_accounts (email, display_name, client_id, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(email) DO UPDATE SET display_name = excluded.display_name, client_id = excluded.client_id,
+            tenant_id = excluded.tenant_id, last_error = NULL",
+        params![email, display_name, client_id, tenant_id, now()],
+    )?;
+    conn.query_row("SELECT id FROM mail_accounts WHERE email = ?1", [email], |r| r.get(0))
+}
+
+pub fn delete_account(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM mail_accounts WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+pub fn set_sync_result(conn: &Connection, id: i64, error: Option<&str>) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE mail_accounts SET last_sync_at = ?1, last_error = ?2 WHERE id = ?3",
+        params![now(), error, id],
+    )?;
+    Ok(())
+}
+
+pub fn set_summary(conn: &Connection, id: i64, summary: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE mail_accounts SET summary = ?1, summary_at = ?2 WHERE id = ?3",
+        params![summary, now(), id],
+    )?;
+    Ok(())
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct Email {
+    pub id: i64,
+    pub account_id: i64,
+    pub subject: String,
+    pub from_name: String,
+    pub from_addr: String,
+    pub received_at: String,
+    pub preview: String,
+    pub is_read: bool,
+    pub web_link: String,
+    pub analyzed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewEmail {
+    pub remote_id: String,
+    pub subject: String,
+    pub from_name: String,
+    pub from_addr: String,
+    pub received_at: String,
+    pub preview: String,
+    pub body: String,
+    pub is_read: bool,
+    pub web_link: String,
+}
+
+const EMAIL_COLS: &str = "id, account_id, subject, from_name, from_addr, received_at, preview, is_read, web_link, analyzed";
+
+fn email_from_row(r: &Row) -> rusqlite::Result<Email> {
+    Ok(Email {
+        id: r.get(0)?,
+        account_id: r.get(1)?,
+        subject: r.get(2)?,
+        from_name: r.get(3)?,
+        from_addr: r.get(4)?,
+        received_at: r.get(5)?,
+        preview: r.get(6)?,
+        is_read: r.get::<_, i64>(7)? != 0,
+        web_link: r.get(8)?,
+        analyzed: r.get::<_, i64>(9)? != 0,
+    })
+}
+
+/// Stores fetched messages, refreshing read state on ones already stored.
+/// Returns how many were new. Keeps only the newest `keep` per account.
+pub fn store_emails(conn: &Connection, account_id: i64, emails: &[NewEmail], keep: i64) -> rusqlite::Result<usize> {
+    let mut added = 0;
+    for e in emails {
+        added += conn.execute(
+            "INSERT OR IGNORE INTO emails (account_id, remote_id, subject, from_name, from_addr, received_at, preview, body, is_read, web_link)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![account_id, e.remote_id, e.subject, e.from_name, e.from_addr, e.received_at, e.preview, e.body, e.is_read as i64, e.web_link],
+        )?;
+        conn.execute(
+            "UPDATE emails SET is_read = ?1 WHERE account_id = ?2 AND remote_id = ?3",
+            params![e.is_read as i64, account_id, e.remote_id],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM emails WHERE account_id = ?1 AND id NOT IN
+            (SELECT id FROM emails WHERE account_id = ?1 ORDER BY received_at DESC LIMIT ?2)",
+        params![account_id, keep],
+    )?;
+    Ok(added)
+}
+
+pub fn list_emails(conn: &Connection, account_id: i64, limit: i64) -> rusqlite::Result<Vec<Email>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {EMAIL_COLS} FROM emails WHERE account_id = ?1 ORDER BY received_at DESC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![account_id, limit], email_from_row)?;
+    rows.collect()
+}
+
+/// The newest emails with their bodies, for Claude to read.
+pub fn emails_for_analysis(conn: &Connection, account_id: i64, limit: i64) -> rusqlite::Result<Vec<(Email, String)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {EMAIL_COLS}, body FROM emails WHERE account_id = ?1 ORDER BY received_at DESC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![account_id, limit], |r| Ok((email_from_row(r)?, r.get(10)?)))?;
+    rows.collect()
+}
+
+pub fn mark_analyzed(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for id in ids {
+        conn.execute("UPDATE emails SET analyzed = 1 WHERE id = ?1", [id])?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct Suggestion {
+    pub id: i64,
+    pub account_id: i64,
+    pub email_id: Option<i64>,
+    pub kind: String,
+    pub title: String,
+    pub notes: String,
+    pub due_at: Option<String>,
+    pub priority: i64,
+    pub project_id: Option<i64>,
+    pub status: String,
+    pub created_at: String,
+    pub email_subject: Option<String>,
+    pub email_from: Option<String>,
+    pub email_link: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewSuggestion {
+    pub account_id: i64,
+    pub email_id: i64,
+    pub kind: String,
+    pub title: String,
+    pub notes: String,
+    pub due_at: Option<String>,
+    pub priority: i64,
+    pub project_id: Option<i64>,
+}
+
+pub fn add_suggestion(conn: &Connection, s: &NewSuggestion) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO suggestions (account_id, email_id, kind, title, notes, due_at, priority, project_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![s.account_id, s.email_id, s.kind, s.title.trim(), s.notes, s.due_at, s.priority.clamp(1, 3), s.project_id, now()],
+    )?;
+    Ok(())
+}
+
+pub fn list_pending_suggestions(conn: &Connection) -> rusqlite::Result<Vec<Suggestion>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.account_id, s.email_id, s.kind, s.title, s.notes, s.due_at, s.priority, s.project_id, s.status, s.created_at,
+                e.subject, COALESCE(NULLIF(e.from_name, ''), e.from_addr), e.web_link
+         FROM suggestions s LEFT JOIN emails e ON e.id = s.email_id
+         WHERE s.status = 'pending' ORDER BY s.id DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Suggestion {
+            id: r.get(0)?,
+            account_id: r.get(1)?,
+            email_id: r.get(2)?,
+            kind: r.get(3)?,
+            title: r.get(4)?,
+            notes: r.get(5)?,
+            due_at: r.get(6)?,
+            priority: r.get(7)?,
+            project_id: r.get(8)?,
+            status: r.get(9)?,
+            created_at: r.get(10)?,
+            email_subject: r.get(11)?,
+            email_from: r.get(12)?,
+            email_link: r.get(13)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn dismiss_suggestion(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE suggestions SET status = 'dismissed' WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// What the user may change on a suggestion before accepting it.
+#[derive(Deserialize, Debug)]
+pub struct AcceptSuggestion {
+    pub id: i64,
+    pub kind: String,
+    pub title: String,
+    pub due_at: Option<String>,
+    pub project_id: Option<i64>,
+}
+
+/// Turns a suggestion into a real todo or reminder, linked to its email.
+pub fn accept_suggestion(conn: &Connection, a: AcceptSuggestion) -> Result<(), String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let (email_id, notes, priority): (Option<i64>, String, i64) = conn
+        .query_row("SELECT email_id, notes, priority FROM suggestions WHERE id = ?1 AND status = 'pending'", [a.id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .optional()
+        .map_err(e)?
+        .ok_or("That suggestion was already handled.")?;
+    if a.title.trim().is_empty() {
+        return Err("A suggestion needs a title before it can be added.".into());
+    }
+    match a.kind.as_str() {
+        "todo" => {
+            let t = add_todo(conn, NewTodo { title: a.title, notes, priority, due_at: a.due_at, project_id: a.project_id }).map_err(e)?;
+            conn.execute("UPDATE todos SET email_id = ?1 WHERE id = ?2", params![email_id, t.id]).map_err(e)?;
+        }
+        "reminder" => {
+            let at = a.due_at.ok_or("Pick a time for the reminder first.")?;
+            let r = add_reminder(conn, NewReminder { title: a.title, remind_at: at, repeat: "none".into(), project_id: a.project_id })?;
+            conn.execute("UPDATE reminders SET email_id = ?1 WHERE id = ?2", params![email_id, r.id]).map_err(e)?;
+        }
+        other => return Err(format!("Unknown suggestion type: {other}")),
+    }
+    conn.execute("UPDATE suggestions SET status = 'accepted' WHERE id = ?1", [a.id]).map_err(e)?;
     Ok(())
 }
 
@@ -560,6 +910,62 @@ mod tests {
         delete_project(&c, p.id).unwrap();
         assert!(list_projects(&c).unwrap().is_empty());
         assert_eq!(list_todos(&c).unwrap()[0].project_id, None);
+    }
+
+    fn sample_email(remote_id: &str, received_at: &str) -> NewEmail {
+        NewEmail {
+            remote_id: remote_id.into(),
+            subject: format!("Subject {remote_id}"),
+            from_name: "Pat".into(),
+            from_addr: "pat@example.com".into(),
+            received_at: received_at.into(),
+            preview: "Can you send the quote by Friday?".into(),
+            body: "Can you send the quote by Friday?".into(),
+            is_read: false,
+            web_link: "https://outlook.office.com/x".into(),
+        }
+    }
+
+    #[test]
+    fn mail_sync_dedupes_and_prunes() {
+        let c = mem();
+        let a = upsert_account(&c, "me@example.com", "Me", "client", "tenant").unwrap();
+        assert_eq!(upsert_account(&c, "me@example.com", "Me", "client2", "tenant").unwrap(), a);
+        let batch = vec![sample_email("1", "2026-09-01T10:00:00Z"), sample_email("2", "2026-09-02T10:00:00Z")];
+        assert_eq!(store_emails(&c, a, &batch, 100).unwrap(), 2);
+        let mut again = batch.clone();
+        again[0].is_read = true;
+        assert_eq!(store_emails(&c, a, &again, 100).unwrap(), 0);
+        let acct = get_account(&c, a).unwrap().unwrap();
+        assert_eq!((acct.unread, acct.client_id.as_str()), (1, "client2"));
+        store_emails(&c, a, &[sample_email("3", "2026-09-03T10:00:00Z")], 2).unwrap();
+        let kept: Vec<String> = list_emails(&c, a, 10).unwrap().into_iter().map(|e| e.subject).collect();
+        assert_eq!(kept, vec!["Subject 3", "Subject 2"]);
+    }
+
+    #[test]
+    fn accepting_a_suggestion_creates_a_linked_todo() {
+        let c = mem();
+        let a = upsert_account(&c, "me@example.com", "Me", "client", "tenant").unwrap();
+        store_emails(&c, a, &[sample_email("1", "2026-09-01T10:00:00Z")], 100).unwrap();
+        let email_id = list_emails(&c, a, 1).unwrap()[0].id;
+        let s = NewSuggestion { account_id: a, email_id, kind: "todo".into(), title: "Send quote".into(), notes: "".into(), due_at: None, priority: 1, project_id: None };
+        add_suggestion(&c, &s).unwrap();
+        add_suggestion(&c, &NewSuggestion { kind: "reminder".into(), ..s }).unwrap();
+        let pending = list_pending_suggestions(&c).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].email_from.as_deref(), Some("Pat"));
+
+        let todo_id = pending.iter().find(|p| p.kind == "todo").unwrap().id;
+        accept_suggestion(&c, AcceptSuggestion { id: todo_id, kind: "todo".into(), title: "Send quote".into(), due_at: None, project_id: None }).unwrap();
+        let todos = list_todos(&c).unwrap();
+        assert_eq!((todos[0].email_id, todos[0].priority), (Some(email_id), 1));
+        assert!(accept_suggestion(&c, AcceptSuggestion { id: todo_id, kind: "todo".into(), title: "x".into(), due_at: None, project_id: None }).is_err());
+
+        let rem_id = pending.iter().find(|p| p.kind == "reminder").unwrap().id;
+        assert!(accept_suggestion(&c, AcceptSuggestion { id: rem_id, kind: "reminder".into(), title: "x".into(), due_at: None, project_id: None }).is_err());
+        dismiss_suggestion(&c, rem_id).unwrap();
+        assert!(list_pending_suggestions(&c).unwrap().is_empty());
     }
 
     #[test]

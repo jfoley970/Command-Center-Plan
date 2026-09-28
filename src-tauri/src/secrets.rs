@@ -22,6 +22,30 @@ pub fn get_api_key() -> Result<Option<String>, String> {
     }
 }
 
+fn mail_entry(email: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(SERVICE, &format!("ms-refresh:{}", email.to_lowercase())).map_err(|e| e.to_string())
+}
+
+/// The Microsoft refresh token for a connected inbox.
+pub fn get_mail_token(email: &str) -> Result<Option<String>, String> {
+    match mail_entry(email)?.get_password() {
+        Ok(t) => Ok(Some(t)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("Could not read the keychain: {e}")),
+    }
+}
+
+pub fn set_mail_token(email: &str, token: &str) -> Result<(), String> {
+    mail_entry(email)?.set_password(token).map_err(|e| format!("Could not save to the keychain: {e}"))
+}
+
+pub fn delete_mail_token(email: &str) -> Result<(), String> {
+    match mail_entry(email)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 pub fn set_api_key(key: &str) -> Result<(), String> {
     let key = key.trim();
     if key.is_empty() {

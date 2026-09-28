@@ -135,7 +135,7 @@ export default function Dashboard({ go }: { go: (p: Page) => void }) {
               <AgentConsole agentId={agentId} setAgentId={setAgentId} onOpenAgents={() => go("agents")} />
             </div>
             <div key="trend"><Trend /></div>
-            <div key="connections"><Integrations /></div>
+            <div key="connections"><Integrations onOpenInbox={() => go("inbox")} /></div>
           </ReactGridLayout>
         )}
       </div>

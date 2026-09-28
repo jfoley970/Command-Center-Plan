@@ -11,6 +11,7 @@ export type Todo = {
   created_at: string;
   done_at: string | null;
   project_id: number | null;
+  email_id: number | null;
 };
 
 export type Repeat = "none" | "daily" | "weekly";
@@ -23,6 +24,51 @@ export type Reminder = {
   fired: boolean;
   created_at: string;
   project_id: number | null;
+  email_id: number | null;
+};
+
+export type MailAccount = {
+  id: number;
+  email: string;
+  display_name: string;
+  client_id: string;
+  tenant_id: string;
+  summary: string;
+  summary_at: string | null;
+  last_sync_at: string | null;
+  last_error: string | null;
+  unread: number;
+  pending: number;
+};
+
+export type Email = {
+  id: number;
+  account_id: number;
+  subject: string;
+  from_name: string;
+  from_addr: string;
+  received_at: string;
+  preview: string;
+  is_read: boolean;
+  web_link: string;
+  analyzed: boolean;
+};
+
+export type Suggestion = {
+  id: number;
+  account_id: number;
+  email_id: number | null;
+  kind: "todo" | "reminder";
+  title: string;
+  notes: string;
+  due_at: string | null;
+  priority: 1 | 2 | 3;
+  project_id: number | null;
+  status: string;
+  created_at: string;
+  email_subject: string | null;
+  email_from: string | null;
+  email_link: string | null;
 };
 
 export type Project = {
@@ -77,6 +123,18 @@ export const api = {
   saveProject: (project: Omit<Project, "id" | "created_at"> & { id?: number }) =>
     invoke<Project>("save_project", { project }),
   deleteProject: (id: number) => invoke<void>("delete_project", { id }),
+
+  getMailSetup: () => invoke<{ client_id: string; tenant_id: string }>("get_mail_setup"),
+  connectMicrosoft: (clientId: string, tenantId: string) =>
+    invoke<MailAccount>("connect_microsoft", { clientId, tenantId }),
+  listMailAccounts: () => invoke<MailAccount[]>("list_mail_accounts"),
+  listEmails: (accountId: number) => invoke<Email[]>("list_emails", { accountId }),
+  syncMail: (accountId: number) => invoke<number>("sync_mail", { accountId }),
+  disconnectMail: (accountId: number) => invoke<void>("disconnect_mail", { accountId }),
+  listSuggestions: () => invoke<Suggestion[]>("list_suggestions"),
+  acceptSuggestion: (suggestion: { id: number; kind: string; title: string; due_at: string | null; project_id: number | null }) =>
+    invoke<void>("accept_suggestion", { suggestion }),
+  dismissSuggestion: (id: number) => invoke<void>("dismiss_suggestion", { id }),
 
   listModels: () => invoke<ModelOption[]>("list_models"),
   listAgents: () => invoke<Agent[]>("list_agents"),
