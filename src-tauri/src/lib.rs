@@ -1,3 +1,4 @@
+mod atera;
 mod claude;
 mod db;
 mod mail;
@@ -311,6 +312,36 @@ async fn run_agent(app: AppHandle, agent_id: i64, input: String) -> CmdResult<db
     Ok(run)
 }
 
+// ---------- Atera ----------
+
+#[tauri::command]
+fn atera_alerts(atera: State<atera::AteraState>) -> CmdResult<atera::Snapshot> {
+    atera.snapshot()
+}
+
+#[tauri::command]
+async fn atera_refresh(app: AppHandle) -> CmdResult<atera::Snapshot> {
+    atera::refresh(&app).await
+}
+
+#[tauri::command]
+async fn atera_set_key(app: AppHandle, key: String) -> CmdResult<atera::Snapshot> {
+    atera::set_key(&key)?;
+    atera::refresh(&app).await
+}
+
+#[tauri::command]
+fn atera_set_customer_hidden(
+    app: AppHandle,
+    atera: State<atera::AteraState>,
+    customer: atera::HiddenCustomer,
+    hidden: bool,
+) -> CmdResult<()> {
+    atera.set_hidden(customer, hidden)?;
+    let _ = app.emit("atera-changed", ());
+    Ok(())
+}
+
 // ---------- Settings ----------
 
 #[tauri::command]
@@ -385,6 +416,7 @@ pub fn run() {
             let database = Db::open(&dir.join("command-center.db"))?;
             db::mark_orphaned_runs(&database.0.lock().unwrap())?;
             app.manage(database);
+            app.manage(atera::AteraState::new(&dir));
 
             let show = MenuItem::with_id(app, "show", "Open Command Center", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -409,6 +441,7 @@ pub fn run() {
 
             start_reminder_loop(app.handle().clone());
             start_mail_loop(app.handle().clone());
+            atera::start_loop(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -449,6 +482,10 @@ pub fn run() {
             run_agent,
             has_api_key,
             set_api_key,
+            atera_alerts,
+            atera_refresh,
+            atera_set_key,
+            atera_set_customer_hidden,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
