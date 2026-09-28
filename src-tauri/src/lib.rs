@@ -3,6 +3,7 @@ mod claude;
 mod db;
 mod mail;
 mod secrets;
+mod unifi;
 
 use db::Db;
 use serde::Serialize;
@@ -342,6 +343,36 @@ fn atera_set_customer_hidden(
     Ok(())
 }
 
+// ---------- UniFi ----------
+
+#[tauri::command]
+fn unifi_fleet(unifi: State<unifi::UnifiState>) -> CmdResult<unifi::Snapshot> {
+    unifi.snapshot()
+}
+
+#[tauri::command]
+async fn unifi_refresh(app: AppHandle) -> CmdResult<unifi::Snapshot> {
+    unifi::refresh(&app).await
+}
+
+#[tauri::command]
+async fn unifi_set_key(app: AppHandle, key: String) -> CmdResult<unifi::Snapshot> {
+    unifi::set_key(&key)?;
+    unifi::refresh(&app).await
+}
+
+#[tauri::command]
+fn unifi_set_site_hidden(
+    app: AppHandle,
+    unifi: State<unifi::UnifiState>,
+    site: unifi::HiddenSite,
+    hidden: bool,
+) -> CmdResult<()> {
+    unifi.set_hidden(site, hidden)?;
+    let _ = app.emit("unifi-changed", ());
+    Ok(())
+}
+
 // ---------- Settings ----------
 
 #[tauri::command]
@@ -417,6 +448,7 @@ pub fn run() {
             db::mark_orphaned_runs(&database.0.lock().unwrap())?;
             app.manage(database);
             app.manage(atera::AteraState::new(&dir));
+            app.manage(unifi::UnifiState::new(&dir));
 
             let show = MenuItem::with_id(app, "show", "Open Command Center", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -442,6 +474,7 @@ pub fn run() {
             start_reminder_loop(app.handle().clone());
             start_mail_loop(app.handle().clone());
             atera::start_loop(app.handle().clone());
+            unifi::start_loop(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -486,6 +519,10 @@ pub fn run() {
             atera_refresh,
             atera_set_key,
             atera_set_customer_hidden,
+            unifi_fleet,
+            unifi_refresh,
+            unifi_set_key,
+            unifi_set_site_hidden,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

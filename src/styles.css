@@ -335,3 +335,17 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
   .split { flex-direction: column; }
   .agent-list { width: 100%; }
 }
+
+/* Settings > Connections */
+.conn-group { display: flex; flex-direction: column; gap: 0.3rem; }
+.conn-group-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; margin: 0; }
+.conn-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.conn-row { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.conn-row.open { border-color: var(--border-strong); }
+.conn-head { display: flex; align-items: center; gap: 0.7rem; width: 100%; background: none; border: none; padding: 0.6rem 0.8rem; text-align: left; color: var(--text); }
+.conn-head:hover:not(:disabled) { background: var(--raised); border: none; }
+.conn-head:disabled { opacity: 1; cursor: default; }
+.conn-text { display: flex; flex-direction: column; min-width: 0; }
+.conn-name { font-weight: 600; }
+.conn-chevron { color: var(--muted); width: 1rem; text-align: center; }
+.conn-panel { padding: 0.2rem 0.8rem 0.8rem 2.1rem; display: flex; flex-direction: column; gap: 0.5rem; }

@@ -98,7 +98,7 @@ function Shell() {
         {page === "todos" && <Todos />}
         {page === "reminders" && <Reminders />}
         {page === "agents" && <Agents selectedId={agentId} onSelect={setAgentId} />}
-        {page === "settings" && <Settings />}
+        {page === "settings" && <Settings go={setPage} />}
       </main>
 
       <Palette
