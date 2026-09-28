@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
 import { useData } from "../data";
 import { formatWhen, fromLocalInput, isOverdue } from "../time";
 
 export default function Todos() {
-  const { todos, projects, act } = useData();
+  const { todos, projects, flagLinks, act } = useData();
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(2);
   const [due, setDue] = useState("");
@@ -25,6 +26,7 @@ export default function Todos() {
   }
 
   const projectOf = (id: number | null) => projects.find((p) => p.id === id);
+  const emailOf = (id: number) => flagLinks.find((f) => f.todo_id === id && f.web_link)?.web_link;
   const activeProjects = projects.filter((p) => !p.archived);
 
   const open = todos.filter((t) => !t.done);
@@ -78,6 +80,9 @@ export default function Todos() {
                   <span className="dot" style={{ background: projectOf(t.project_id)!.color }} />
                   {projectOf(t.project_id)!.name}
                 </span>
+              )}
+              {emailOf(t.id) && (
+                <button className="ghost" onClick={() => openUrl(emailOf(t.id)!)} title="Open the flagged email in Outlook" aria-label="Open email">✉</button>
               )}
               {t.due_at && <span className={!t.done && isOverdue(t.due_at) ? "tag bad" : "tag"}>{formatWhen(t.due_at)}</span>}
               <button className="ghost" onClick={() => act(() => api.deleteTodo(t.id))} aria-label="Delete">

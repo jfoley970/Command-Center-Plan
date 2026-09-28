@@ -71,6 +71,15 @@ export type Suggestion = {
   email_link: string | null;
 };
 
+export type FlagLink = {
+  account_id: number;
+  todo_id: number | null;
+  subject: string;
+  sender: string;
+  web_link: string;
+  flagged: boolean;
+};
+
 export type Project = {
   id: number;
   name: string;
@@ -131,6 +140,7 @@ export const api = {
   listEmails: (accountId: number) => invoke<Email[]>("list_emails", { accountId }),
   syncMail: (accountId: number) => invoke<number>("sync_mail", { accountId }),
   disconnectMail: (accountId: number) => invoke<void>("disconnect_mail", { accountId }),
+  listFlagLinks: () => invoke<FlagLink[]>("list_flag_links"),
   listSuggestions: () => invoke<Suggestion[]>("list_suggestions"),
   acceptSuggestion: (suggestion: { id: number; kind: string; title: string; due_at: string | null; project_id: number | null }) =>
     invoke<void>("accept_suggestion", { suggestion }),

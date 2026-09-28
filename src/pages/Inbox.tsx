@@ -13,7 +13,7 @@ function ago(iso: string | null): string {
 }
 
 export default function Inbox({ selectedId, onSelect, go }: { selectedId: number | null; onSelect: (id: number | null) => void; go: (p: "settings") => void }) {
-  const { mailAccounts, hasKey } = useData();
+  const { mailAccounts } = useData();
   const [connecting, setConnecting] = useState(false);
 
   const account = mailAccounts.find((a) => a.id === selectedId) ?? mailAccounts[0];
@@ -45,12 +45,6 @@ export default function Inbox({ selectedId, onSelect, go }: { selectedId: number
       </aside>
 
       <div className="grow stack">
-        {!hasKey && (
-          <div className="notice">
-            <span className="grow">Mail syncs without it, but summaries and suggestions need your Claude API key.</span>
-            <button onClick={() => go("settings")}>Open Settings</button>
-          </div>
-        )}
         {showConnect ? (
           <ConnectCard
             onDone={(a) => {
@@ -60,7 +54,7 @@ export default function Inbox({ selectedId, onSelect, go }: { selectedId: number
             onCancel={mailAccounts.length > 0 ? () => setConnecting(false) : undefined}
           />
         ) : (
-          account && <AccountView account={account} onGone={() => onSelect(null)} />
+          account && <AccountView account={account} onGone={() => onSelect(null)} go={go} />
         )}
       </div>
     </div>
@@ -114,8 +108,8 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
   );
 }
 
-function AccountView({ account, onGone }: { account: MailAccount; onGone: () => void }) {
-  const { suggestions, act } = useData();
+function AccountView({ account, onGone, go }: { account: MailAccount; onGone: () => void; go: (p: "settings") => void }) {
+  const { suggestions, flagLinks, todos, hasKey, act } = useData();
   const [emails, setEmails] = useState<Email[]>([]);
   const [syncing, setSyncing] = useState(false);
 
@@ -136,6 +130,8 @@ function AccountView({ account, onGone }: { account: MailAccount; onGone: () => 
   }
 
   const mine = suggestions.filter((s) => s.account_id === account.id);
+  const flags = flagLinks.filter((f) => f.account_id === account.id && f.flagged);
+  const todoDone = (id: number | null) => todos.find((t) => t.id === id)?.done;
 
   return (
     <>
@@ -155,6 +151,27 @@ function AccountView({ account, onGone }: { account: MailAccount; onGone: () => 
         {account.last_error && <div className="notice bad"><span className="grow">{account.last_error}</span></div>}
       </section>
 
+      <section className="card stack">
+        <h2>Flagged in Outlook {flags.length > 0 && <span className="tag accent">{flags.length}</span>}</h2>
+        {flags.length === 0 && <p className="muted">Flag an email in Outlook and it becomes a todo here on the next sync. Clearing or completing the flag checks the todo off.</p>}
+        <ul className="list">
+          {flags.map((f) => (
+            <li key={f.web_link || f.subject} className={todoDone(f.todo_id) ? "done" : ""}>
+              <span className="grow truncate">{f.subject || "(no subject)"}<span className="muted small"> · {f.sender}</span></span>
+              <span className="tag">{f.todo_id == null ? "Todo deleted" : todoDone(f.todo_id) ? "Done" : "In todos"}</span>
+              {f.web_link && <button className="ghost" onClick={() => openUrl(f.web_link)} title="Open in Outlook" aria-label="Open in Outlook">↗</button>}
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      {!hasKey ? (
+        <section className="card row between">
+          <p className="muted">Optional: add a Claude API key to get an inbox summary and suggested tasks. This is billed by Anthropic per use.</p>
+          <button onClick={() => go("settings")}>Open Settings</button>
+        </section>
+      ) : (
+      <>
       <section className="card stack">
         <div className="row between">
           <h2>Summary</h2>
@@ -176,6 +193,8 @@ function AccountView({ account, onGone }: { account: MailAccount; onGone: () => 
           ))}
         </ul>
       </section>
+      </>
+      )}
 
       <section className="card stack">
         <h2>Recent mail</h2>

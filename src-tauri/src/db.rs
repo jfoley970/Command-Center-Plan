@@ -78,6 +78,18 @@ CREATE TABLE IF NOT EXISTS suggestions (
     status      TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | dismissed
     created_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS flag_links (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    remote_id   TEXT NOT NULL,
+    todo_id     INTEGER REFERENCES todos(id) ON DELETE SET NULL,
+    subject     TEXT NOT NULL DEFAULT '',
+    sender      TEXT NOT NULL DEFAULT '',
+    web_link    TEXT NOT NULL DEFAULT '',
+    flagged     INTEGER NOT NULL DEFAULT 1,  -- whether Outlook showed it flagged at the last sync
+    created_at  TEXT NOT NULL,
+    UNIQUE (account_id, remote_id)
+);
 CREATE TABLE IF NOT EXISTS agents (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL,
@@ -739,6 +751,123 @@ pub fn accept_suggestion(conn: &Connection, a: AcceptSuggestion) -> Result<(), S
     Ok(())
 }
 
+// ---------- Outlook flags ----------
+
+/// A message Outlook currently shows as flagged.
+#[derive(Debug, Clone)]
+pub struct FlaggedMessage {
+    pub remote_id: String,
+    pub subject: String,
+    pub sender: String,
+    pub web_link: String,
+    /// When the flag has a due date, the todo is due at this time.
+    pub due_at: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct FlagSyncResult {
+    pub created: usize,
+    pub completed: usize,
+    pub reopened: usize,
+}
+
+/// Mirrors Outlook flags onto todos. A newly flagged message becomes a todo; a
+/// cleared or completed flag checks its todo off; flagging it again reopens it.
+/// Checking a todo off in the app sticks while the flag stays on, since the app
+/// can't change Outlook.
+pub fn sync_flags(conn: &Connection, account_id: i64, flagged: &[FlaggedMessage]) -> rusqlite::Result<FlagSyncResult> {
+    let mut result = FlagSyncResult::default();
+    for m in flagged {
+        let link: Option<(i64, Option<i64>, bool)> = conn
+            .query_row(
+                "SELECT id, todo_id, flagged FROM flag_links WHERE account_id = ?1 AND remote_id = ?2",
+                params![account_id, m.remote_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+            )
+            .optional()?;
+        let title = if m.subject.trim().is_empty() { "(no subject)".to_string() } else { m.subject.clone() };
+        let new_todo = |conn: &Connection| {
+            add_todo(
+                conn,
+                NewTodo { title: title.clone(), notes: format!("Flagged email from {}", m.sender), priority: 2, due_at: m.due_at.clone(), project_id: None },
+            )
+        };
+        match link {
+            None => {
+                let t = new_todo(conn)?;
+                conn.execute(
+                    "INSERT INTO flag_links (account_id, remote_id, todo_id, subject, sender, web_link, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![account_id, m.remote_id, t.id, m.subject, m.sender, m.web_link, now()],
+                )?;
+                result.created += 1;
+            }
+            Some((link_id, todo_id, was_flagged)) => {
+                if !was_flagged {
+                    // Flagged again after being cleared: bring the todo back.
+                    let todo_id = match todo_id {
+                        Some(id) if conn.query_row("SELECT 1 FROM todos WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some() => {
+                            set_todo_done(conn, id, false)?;
+                            id
+                        }
+                        _ => new_todo(conn)?.id,
+                    };
+                    conn.execute("UPDATE flag_links SET todo_id = ?1, flagged = 1 WHERE id = ?2", params![todo_id, link_id])?;
+                    result.reopened += 1;
+                }
+                conn.execute(
+                    "UPDATE flag_links SET subject = ?1, sender = ?2, web_link = ?3 WHERE id = ?4",
+                    params![m.subject, m.sender, m.web_link, link_id],
+                )?;
+            }
+        }
+    }
+
+    // Flags that were on last time and are gone now: check their todos off.
+    let current: std::collections::HashSet<&str> = flagged.iter().map(|m| m.remote_id.as_str()).collect();
+    let mut stmt = conn.prepare("SELECT id, remote_id, todo_id FROM flag_links WHERE account_id = ?1 AND flagged = 1")?;
+    let was_on: Vec<(i64, String, Option<i64>)> =
+        stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+    for (link_id, remote_id, todo_id) in was_on {
+        if current.contains(remote_id.as_str()) {
+            continue;
+        }
+        conn.execute("UPDATE flag_links SET flagged = 0 WHERE id = ?1", [link_id])?;
+        if let Some(id) = todo_id {
+            if conn.execute("UPDATE todos SET done = 1, done_at = ?1 WHERE id = ?2 AND done = 0", params![now(), id])? > 0 {
+                result.completed += 1;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct FlagLink {
+    pub account_id: i64,
+    pub todo_id: Option<i64>,
+    pub subject: String,
+    pub sender: String,
+    pub web_link: String,
+    pub flagged: bool,
+}
+
+pub fn list_flag_links(conn: &Connection) -> rusqlite::Result<Vec<FlagLink>> {
+    let mut stmt = conn.prepare(
+        "SELECT account_id, todo_id, subject, sender, web_link, flagged FROM flag_links ORDER BY flagged DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(FlagLink {
+            account_id: r.get(0)?,
+            todo_id: r.get(1)?,
+            subject: r.get(2)?,
+            sender: r.get(3)?,
+            web_link: r.get(4)?,
+            flagged: r.get::<_, i64>(5)? != 0,
+        })
+    })?;
+    rows.collect()
+}
+
 // ---------- Agents ----------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -966,6 +1095,40 @@ mod tests {
         assert!(accept_suggestion(&c, AcceptSuggestion { id: rem_id, kind: "reminder".into(), title: "x".into(), due_at: None, project_id: None }).is_err());
         dismiss_suggestion(&c, rem_id).unwrap();
         assert!(list_pending_suggestions(&c).unwrap().is_empty());
+    }
+
+    fn flag(id: &str) -> FlaggedMessage {
+        FlaggedMessage { remote_id: id.into(), subject: format!("Re: {id}"), sender: "Pat".into(), web_link: "https://x".into(), due_at: None }
+    }
+
+    #[test]
+    fn outlook_flags_drive_todos() {
+        let c = mem();
+        let a = upsert_account(&c, "me@example.com", "Me", "client", "tenant").unwrap();
+        let r = sync_flags(&c, a, &[flag("1"), flag("2")]).unwrap();
+        assert_eq!(r, FlagSyncResult { created: 2, completed: 0, reopened: 0 });
+        assert_eq!(sync_flags(&c, a, &[flag("1"), flag("2")]).unwrap(), FlagSyncResult::default());
+        assert_eq!(list_todos(&c).unwrap().iter().filter(|t| !t.done).count(), 2);
+
+        // Completing in the app sticks while the flag stays on.
+        let t2 = list_todos(&c).unwrap().into_iter().find(|t| t.title == "Re: 2").unwrap();
+        set_todo_done(&c, t2.id, true).unwrap();
+        sync_flags(&c, a, &[flag("1"), flag("2")]).unwrap();
+        assert!(list_todos(&c).unwrap().iter().find(|t| t.id == t2.id).unwrap().done);
+
+        // Clearing the flag in Outlook checks the todo off; flagging again reopens it.
+        let r = sync_flags(&c, a, &[flag("2")]).unwrap();
+        assert_eq!(r.completed, 1);
+        let t1 = list_todos(&c).unwrap().into_iter().find(|t| t.title == "Re: 1").unwrap();
+        assert!(t1.done);
+        let r = sync_flags(&c, a, &[flag("1"), flag("2")]).unwrap();
+        assert_eq!(r.reopened, 1);
+        assert!(!list_todos(&c).unwrap().iter().find(|t| t.id == t1.id).unwrap().done);
+
+        // A deleted todo comes back only if the flag is cleared and set again.
+        delete_todo(&c, t1.id).unwrap();
+        assert_eq!(sync_flags(&c, a, &[flag("1"), flag("2")]).unwrap(), FlagSyncResult::default());
+        assert_eq!(list_flag_links(&c).unwrap().len(), 2);
     }
 
     #[test]

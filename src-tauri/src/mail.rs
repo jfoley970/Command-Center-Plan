@@ -331,6 +331,72 @@ async fn fetch_inbox(token: &str) -> Result<Vec<NewEmail>, String> {
         .collect())
 }
 
+#[derive(Deserialize)]
+struct FlaggedList {
+    value: Vec<FlaggedGraphMessage>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlaggedGraphMessage {
+    id: String,
+    subject: Option<String>,
+    from: Option<Recipient>,
+    web_link: Option<String>,
+    flag: Option<Flag>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Flag {
+    due_date_time: Option<GraphDateTime>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphDateTime {
+    date_time: String,
+}
+
+/// Outlook flag due dates are whole days; the todo is due at 5 PM local that day.
+fn flag_due(d: &GraphDateTime) -> Option<String> {
+    use chrono::TimeZone;
+    let date = chrono::NaiveDate::parse_from_str(d.date_time.get(..10)?, "%Y-%m-%d").ok()?;
+    let local = chrono::Local.from_local_datetime(&date.and_hms_opt(17, 0, 0)?).earliest()?;
+    Some(local.with_timezone(&chrono::Utc).to_rfc3339())
+}
+
+/// Every message currently flagged for follow-up, in any folder.
+async fn fetch_flagged(token: &str) -> Result<Vec<db::FlaggedMessage>, String> {
+    let url = Url::parse_with_params(
+        &format!("{GRAPH}/me/messages"),
+        &[
+            ("$filter", "flag/flagStatus eq 'flagged'"),
+            ("$top", "200"),
+            ("$select", "id,subject,from,webLink,flag"),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let list: FlaggedList = graph_get(token, url.as_str()).await?;
+    Ok(list
+        .value
+        .into_iter()
+        .map(|m| {
+            let sender = m
+                .from
+                .map(|f| f.email_address.name.filter(|n| !n.is_empty()).or(f.email_address.address).unwrap_or_default())
+                .unwrap_or_default();
+            db::FlaggedMessage {
+                remote_id: m.id,
+                subject: m.subject.unwrap_or_default(),
+                sender,
+                web_link: m.web_link.unwrap_or_default(),
+                due_at: m.flag.and_then(|f| f.due_date_time).and_then(|d| flag_due(&d)),
+            }
+        })
+        .collect())
+}
+
 // ---------- Claude digest ----------
 
 #[derive(Deserialize)]
@@ -412,13 +478,15 @@ pub async fn sync_account(app: &tauri::AppHandle, account_id: i64) -> Result<usi
 
     let fetched = async {
         let token = access_token(&account).await?;
-        fetch_inbox(&token).await
+        let inbox = fetch_inbox(&token).await?;
+        let flagged = fetch_flagged(&token).await?;
+        Ok::<_, String>((inbox, flagged))
     }
     .await;
 
     let state = app.state::<db::Db>();
-    let emails = match fetched {
-        Ok(e) => e,
+    let (emails, flagged) = match fetched {
+        Ok(f) => f,
         Err(err) => {
             let _ = db::set_sync_result(&state.0.lock().unwrap(), account_id, Some(&err));
             return Err(err);
@@ -427,6 +495,7 @@ pub async fn sync_account(app: &tauri::AppHandle, account_id: i64) -> Result<usi
     let added = {
         let conn = state.0.lock().unwrap();
         let added = db::store_emails(&conn, account_id, &emails, KEEP).map_err(|e| e.to_string())?;
+        db::sync_flags(&conn, account_id, &flagged).map_err(|e| e.to_string())?;
         db::set_sync_result(&conn, account_id, None).map_err(|e| e.to_string())?;
         added
     };
@@ -546,6 +615,14 @@ mod tests {
         assert_eq!(q["code_challenge"], pkce_challenge(&p.verifier));
         assert!(q["redirect_uri"].starts_with("http://localhost:"));
         assert!(q["scope"].contains("Mail.Read"));
+    }
+
+    #[test]
+    fn flag_due_is_5pm_local_on_that_day() {
+        let due = flag_due(&GraphDateTime { date_time: "2026-10-02T00:00:00.0000000".into() }).unwrap();
+        let local = chrono::DateTime::parse_from_rfc3339(&due).unwrap().with_timezone(&chrono::Local);
+        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-10-02 17:00");
+        assert!(flag_due(&GraphDateTime { date_time: "garbage".into() }).is_none());
     }
 
     #[test]

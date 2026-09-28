@@ -173,6 +173,11 @@ fn disconnect_mail(db: State<Db>, account_id: i64) -> CmdResult<()> {
 }
 
 #[tauri::command]
+fn list_flag_links(db: State<Db>) -> CmdResult<Vec<db::FlagLink>> {
+    db::list_flag_links(&db.0.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command]
 fn list_suggestions(db: State<Db>) -> CmdResult<Vec<db::Suggestion>> {
     db::list_pending_suggestions(&db.0.lock().unwrap()).map_err(err)
 }
@@ -432,6 +437,7 @@ pub fn run() {
             list_emails,
             sync_mail,
             disconnect_mail,
+            list_flag_links,
             list_suggestions,
             accept_suggestion,
             dismiss_suggestion,
