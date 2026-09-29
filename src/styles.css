@@ -385,3 +385,25 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 .list li:has(> .time-edit) { flex-wrap: wrap; }
 .list li > .time-edit { order: 10; flex-basis: 100%; justify-content: flex-end; }
 .list li:has(> .time-edit) > button.ghost:not(.time-edit button) { display: none; }
+
+/* ---------- Pomodoro timer in the top margin ---------- */
+.pomo {
+  position: fixed; top: 5px; right: 14px; z-index: 15;
+  display: flex; align-items: center; gap: 5px; height: 22px; padding: 0 3px 0 8px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+  font-size: 0.72rem; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.pomo-dot { width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
+.pomo-running.pomo-work .pomo-dot { background: var(--series-2); border-color: var(--series-2); }
+.pomo-running.pomo-break .pomo-dot { background: var(--good); border-color: var(--good); }
+.pomo-paused .pomo-dot { border-color: var(--warning); }
+.pomo-running .pomo-time, .pomo-paused .pomo-time { color: var(--text); }
+.pomo-paused .pomo-time { opacity: 0.7; }
+.pomo-phase { text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.62rem; }
+.pomo-time { font-weight: 600; min-width: 2.6em; text-align: right; }
+.pomo-btn {
+  width: 18px; height: 18px; padding: 0; display: grid; place-items: center; border-radius: 50%;
+  border: none; background: transparent; color: var(--muted); fill: currentColor;
+}
+.pomo-btn:hover:not(:disabled) { color: var(--text); background: var(--raised); border: none; }
+.pomo-actions { gap: 0.4rem; flex-wrap: wrap; }
