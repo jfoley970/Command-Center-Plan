@@ -373,3 +373,8 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
   padding: 0.1rem 0.55rem; border-radius: 999px; font-size: 0.75rem; color: var(--text-2);
 }
 .target-chip .dot { width: 8px; height: 8px; }
+/* Todos inside a project use its color: solid for high priority, lighter for normal, an outline for low. */
+.list li.in-project input[type="checkbox"] { accent-color: var(--proj); }
+.list li.in-project .prio-btn, .list li.in-project .prio-btn:hover { background: var(--proj); }
+.list li.in-project .prio-btn.p2, .list li.in-project .prio-btn.p2:hover { opacity: 0.55; }
+.list li.in-project .prio-btn.p3, .list li.in-project .prio-btn.p3:hover { background: transparent; box-shadow: inset 0 0 0 1.5px var(--proj); }

@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactElement } from "react";
+import { useState, type CSSProperties, type FormEvent, type ReactElement } from "react";
 import { api, type Project, type Todo } from "../api";
 import { useData } from "../data";
 import { buildProjectTree, type ProjectNode } from "../projectTree";
@@ -111,9 +111,11 @@ export default function TodosWidget({ filter, setFilter }: { filter: TodoFilter;
     document.getElementById("todo-add")?.focus();
   }
 
-  function row(t: Todo, depth: number) {
+  function row(t: Todo, depth: number, color?: string) {
+    // Inside a project, the dot and checkbox take the project's color and priority shows as how solid the dot is.
+    const style = color ? ({ ...indent(depth), "--proj": color } as CSSProperties) : indent(depth);
     return (
-      <li key={t.id} className={t.done ? "done" : ""} style={indent(depth)}>
+      <li key={t.id} className={[t.done ? "done" : "", color ? "in-project" : ""].join(" ").trim()} style={style}>
         <input
           type="checkbox"
           checked={t.done}
@@ -165,7 +167,7 @@ export default function TodosWidget({ filter, setFilter }: { filter: TodoFilter;
     const key = `p:${g.project.id}`;
     const rows = [header(key, g.project.name, g.total, g.depth, g.project.color, g.project)];
     if (!collapsed.has(key)) {
-      rows.push(...g.children.flatMap(group), ...g.todos.map((t) => row(t, g.depth + 1)));
+      rows.push(...g.children.flatMap(group), ...g.todos.map((t) => row(t, g.depth + 1, g.project.color)));
     }
     return rows;
   }
