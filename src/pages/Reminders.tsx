@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { api, type Repeat } from "../api";
 import { useData } from "../data";
-import { formatWhen, fromLocalInput, toLocalInput } from "../time";
+import { fromLocalInput, toLocalInput } from "../time";
+import ReminderTime from "../widgets/ReminderTime";
 
 function inAnHour(): string {
   const d = new Date(Date.now() + 60 * 60 * 1000);
@@ -55,7 +56,7 @@ export default function Reminders() {
             <li key={r.id}>
               <span className="grow">{r.title}</span>
               {r.repeat !== "none" && <span className="tag">{r.repeat}</span>}
-              <span className="tag">{formatWhen(r.remind_at)}</span>
+              <ReminderTime reminder={r} />
               <button className="ghost" onClick={() => act(() => api.deleteReminder(r.id))} aria-label="Delete">✕</button>
             </li>
           ))}
@@ -69,8 +70,8 @@ export default function Reminders() {
             {past.map((r) => (
               <li key={r.id} className="done">
                 <span className="grow">{r.title}</span>
-                <span className="tag">{formatWhen(r.remind_at)}</span>
-                <button onClick={() => act(() => api.snoozeReminder(r.id, 10))}>Snooze 10 min</button>
+                <ReminderTime reminder={r} />
+                <button onClick={() => act(() => api.extendReminder(r.id, 10))}>Snooze 10 min</button>
                 <button className="ghost" onClick={() => act(() => api.deleteReminder(r.id))} aria-label="Delete">✕</button>
               </li>
             ))}

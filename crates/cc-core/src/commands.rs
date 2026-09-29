@@ -102,9 +102,15 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             if reminder.title.trim().is_empty() {
                 return Err("A reminder needs a title.".into());
             }
-            ok(db::add_reminder(&conn(), reminder)?)
+            let r = db::add_reminder(&conn(), reminder)?;
+            core.changed("reminders-changed");
+            ok(r)
         }
-        "delete_reminder" => ok(db::delete_reminder(&conn(), args::<Id>(a)?.id).map_err(err)?),
+        "delete_reminder" => {
+            db::delete_reminder(&conn(), args::<Id>(a)?.id).map_err(err)?;
+            core.changed("reminders-changed");
+            ok(())
+        }
         "snooze_reminder" => {
             #[derive(Deserialize)]
             struct A {
@@ -112,7 +118,32 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
                 minutes: i64,
             }
             let A { id, minutes } = args(a)?;
-            ok(db::snooze_reminder(&conn(), id, minutes.max(1)).map_err(err)?)
+            db::snooze_reminder(&conn(), id, minutes.max(1)).map_err(err)?;
+            core.changed("reminders-changed");
+            ok(())
+        }
+        "reschedule_reminder" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                id: i64,
+                remind_at: String,
+            }
+            let A { id, remind_at } = args(a)?;
+            let r = db::reschedule_reminder(&conn(), id, &remind_at)?;
+            core.changed("reminders-changed");
+            ok(r)
+        }
+        "extend_reminder" => {
+            #[derive(Deserialize)]
+            struct A {
+                id: i64,
+                minutes: i64,
+            }
+            let A { id, minutes } = args(a)?;
+            let r = db::extend_reminder(&conn(), id, minutes.clamp(1, 60 * 24 * 30))?;
+            core.changed("reminders-changed");
+            ok(r)
         }
 
         // ---------- Projects ----------
