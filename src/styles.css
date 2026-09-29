@@ -386,13 +386,20 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 .list li > .time-edit { order: 10; flex-basis: 100%; justify-content: flex-end; }
 .list li:has(> .time-edit) > button.ghost:not(.time-edit button) { display: none; }
 
-/* ---------- Pomodoro timer in the top margin ---------- */
-.pomo {
+/* ---------- Toolbar in the top-right margin ---------- */
+.topbar {
   position: fixed; top: 5px; right: 14px; z-index: 15;
-  display: flex; align-items: center; gap: 5px; height: 22px; padding: 0 3px 0 8px;
+  display: flex; align-items: center; height: 22px; padding: 0 3px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
-  font-size: 0.72rem; color: var(--muted); font-variant-numeric: tabular-nums;
+  font-size: 0.72rem; color: var(--muted);
 }
+.topbar-item { display: flex; align-items: center; gap: 5px; height: 100%; padding: 0 0 0 5px; }
+.topbar:empty { display: none; }
+/* A thin divider between tools. */
+.topbar-item + .topbar-item { margin-left: 5px; border-left: 1px solid var(--border); padding-left: 8px; }
+
+/* ---------- Pomodoro timer ---------- */
+.pomo { font-variant-numeric: tabular-nums; }
 .pomo-dot { width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
 .pomo-running.pomo-work .pomo-dot { background: var(--series-2); border-color: var(--series-2); }
 .pomo-running.pomo-break .pomo-dot { background: var(--good); border-color: var(--good); }

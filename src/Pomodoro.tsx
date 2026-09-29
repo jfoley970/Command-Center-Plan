@@ -60,7 +60,7 @@ export default function Pomodoro() {
   const label = timer.phase === "work" ? "Focus" : "Break";
   return (
     <>
-      <div className={`pomo pomo-${timer.state} pomo-${timer.phase}`} role="timer" aria-label={`Pomodoro ${label.toLowerCase()}: ${clock(left)} ${timer.state}`}>
+      <div className={`topbar-item pomo pomo-${timer.state} pomo-${timer.phase}`} role="timer" aria-label={`Pomodoro ${label.toLowerCase()}: ${clock(left)} ${timer.state}`}>
         <span className="pomo-dot" aria-hidden="true" />
         <span className="pomo-phase">{label}</span>
         <span className="pomo-time">{clock(left)}</span>

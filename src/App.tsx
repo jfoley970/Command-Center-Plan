@@ -12,7 +12,7 @@ import Reminders from "./pages/Reminders";
 import Agents from "./pages/Agents";
 import Settings from "./pages/Settings";
 import ReminderAlerts from "./ReminderAlerts";
-import Pomodoro from "./Pomodoro";
+import TopBar from "./TopBar";
 import "./styles.css";
 
 export type Page = "dashboard" | "inbox" | "projects" | "todos" | "reminders" | "agents" | "settings";
@@ -104,7 +104,7 @@ function Shell() {
       </main>
 
       <ReminderAlerts />
-      <Pomodoro />
+      <TopBar />
 
       <Palette
         open={paletteOpen}
