@@ -1,0 +1,69 @@
+# Command Center on the Linux server.
+#
+#   cd deploy && cp .env.example .env   # fill it in
+#   openssl rand -hex 32 > secrets/cc-secret-key && chmod 600 secrets/cc-secret-key
+#   docker compose up -d --build
+#
+# Caddy is the only thing that listens on the network, and only on the
+# WireGuard address, so nothing here is reachable from the internet. The
+# WireGuard endpoint itself (UDP, on an address from the public IP block) runs
+# on the host or the edge router, not in this file.
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "${WG_ADDRESS}:443:443"
+      - "${WG_ADDRESS}:80:80"
+    environment:
+      CC_PUBLIC_HOST: ${CC_PUBLIC_HOST}
+      AUTH_OUTPOST: ${AUTH_OUTPOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - cc-server
+
+  cc-server:
+    build: ..
+    restart: unless-stopped
+    environment:
+      # Caddy sets this after the auth service signs you in and strips it from client requests.
+      CC_AUTH_HEADER: X-Authentik-Username
+      CC_SECRET_KEY_FILE: /run/secrets/cc-secret-key
+      TZ: ${TZ}
+    secrets:
+      - cc-secret-key
+    volumes:
+      - cc-data:/data
+    # Not published: only Caddy reaches it on the compose network.
+    expose:
+      - "8484"
+
+  # Local models. Needs the NVIDIA container toolkit on the host; start with
+  # `docker compose --profile llm up -d` once the GPU is in.
+  ollama:
+    image: ollama/ollama
+    profiles: ["llm"]
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    expose:
+      - "11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+secrets:
+  cc-secret-key:
+    file: ./secrets/cc-secret-key
+
+volumes:
+  caddy-data:
+  cc-data:
+  ollama:

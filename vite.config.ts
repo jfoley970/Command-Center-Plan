@@ -25,8 +25,12 @@ export default defineConfig(() => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching the Rust code
+      ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**"],
+    },
+    // In a browser, `npm run dev` talks to a local cc-server (cargo run -p cc-server).
+    proxy: {
+      "/api": { target: "http://127.0.0.1:8484", ws: true },
     },
   },
 }));

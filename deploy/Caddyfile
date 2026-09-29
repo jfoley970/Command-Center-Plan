@@ -1,0 +1,28 @@
+# TLS for the app name, and sign-in through the local auth service before
+# anything reaches cc-server.
+#
+# Certificates: the default HTTP challenge needs Let's Encrypt to reach port 80,
+# which the WireGuard-only setup does not allow. Use the DNS challenge against
+# your DNS provider instead (needs a Caddy build with that provider's module),
+# or `tls internal` and trust Caddy's root on your machines.
+
+{$CC_PUBLIC_HOST} {
+	# tls {
+	# 	dns <provider> {env.DNS_API_TOKEN}
+	# }
+	tls internal
+
+	# Authentik's outpost endpoints (login redirects and callbacks).
+	reverse_proxy /outpost.goauthentik.io/* {$AUTH_OUTPOST}
+
+	# Everything else needs a signed-in session. copy_headers also drops any
+	# X-Authentik-* header a client sends itself, so the identity cc-server sees
+	# always comes from the auth service.
+	forward_auth {$AUTH_OUTPOST} {
+		uri /outpost.goauthentik.io/auth/caddy
+		copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
+		trusted_proxies private_ranges
+	}
+
+	reverse_proxy cc-server:8484
+}

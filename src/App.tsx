@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Command } from "cmdk";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "./transport";
 import { api } from "./api";
 import { DataProvider, useData } from "./data";
 import { minutesFromNow, quick, tomorrowAt9 } from "./quick";

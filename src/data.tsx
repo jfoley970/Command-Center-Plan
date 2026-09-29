@@ -1,6 +1,6 @@
 // One shared copy of the app's data, refreshed after any change or backend event.
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "./transport";
 import { api, errorText, type Agent, type AgentRun, type FlagLink, type MailAccount, type Project, type Reminder, type Suggestion, type Todo } from "./api";
 
 type Data = {

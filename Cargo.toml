@@ -1,0 +1,12 @@
+[workspace]
+members = ["src-tauri", "crates/cc-core", "crates/cc-server"]
+resolver = "2"
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+# Profiles only take effect at the workspace root.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

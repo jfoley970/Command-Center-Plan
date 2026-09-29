@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "./transport";
 import { errorText } from "./api";
 
 /** Loads a backend snapshot, reloads it when `event` fires, and once a minute so "5m ago" labels stay current. */

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Page } from "../App";
+import { keyStore } from "../transport";
 import { allConnectors, type Connector } from "../connectors";
 import type { ConnectorState } from "../connectors/registry";
 
@@ -21,7 +22,7 @@ export default function Settings({ go }: { go: (p: Page) => void }) {
       <section className="card stack">
         <div>
           <h2>Connections</h2>
-          <p className="muted small">Every API, agent and service the app uses. Keys are stored in your operating system's keychain.</p>
+          <p className="muted small">Every API, agent and service the app uses. Keys are stored in {keyStore}.</p>
         </div>
         {GROUPS.map((g) => {
           const items = connectors.filter((c) => c.group === g);

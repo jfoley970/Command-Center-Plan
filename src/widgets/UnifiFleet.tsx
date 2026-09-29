@@ -3,6 +3,7 @@ import { api, errorText } from "../api";
 import { ago } from "../atera";
 import { useData } from "../data";
 import { useLiveSnapshot } from "../live";
+import { keyStore } from "../transport";
 import { unifi, type UnifiSite } from "../unifi";
 import Widget from "./Widget";
 import "./atera.css";
@@ -212,7 +213,7 @@ export function UnifiSetup({ onBusy, busy }: { onBusy?: (fn: () => Promise<unkno
       {err && <p className="atera-error">{err}</p>}
       <p className="muted small">
         Sign in at unifi.ui.com, open API in the left menu and create a key. It is read-only, covers every console on the
-        account, and is stored in the system keychain. Sites refresh every 5 minutes, and a console, gateway or device going
+        account, and is stored in {keyStore}. Sites refresh every 5 minutes, and a console, gateway or device going
         offline pops a notification.
       </p>
       {snap && snap.hidden_sites.length > 0 && (

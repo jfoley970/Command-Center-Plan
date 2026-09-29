@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { api } from "../api";
+import { keyStore } from "../transport";
 import { useData } from "../data";
 import { registerConnector } from "./registry";
 
@@ -40,7 +41,7 @@ function ClaudePanel() {
           </button>
         )}
       </div>
-      <p className="muted small">Stored in your operating system's keychain, never in a file.{saved && " Saved."}</p>
+      <p className="muted small">Stored in {keyStore}, never in a plain file.{saved && " Saved."}</p>
     </form>
   );
 }
