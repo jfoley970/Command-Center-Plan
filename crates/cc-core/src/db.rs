@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS projects (
     description TEXT NOT NULL DEFAULT '',
     color       TEXT NOT NULL DEFAULT '#4c8dff',
     archived    INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    parent_id   INTEGER REFERENCES projects(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -146,6 +147,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 "ALTER TABLE {table} ADD COLUMN email_id INTEGER REFERENCES emails(id) ON DELETE SET NULL"
             ))?;
         }
+    }
+    if !has_column(conn, "projects", "parent_id")? {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id) ON DELETE SET NULL")?;
     }
     Ok(())
 }
@@ -389,6 +393,8 @@ pub struct Project {
     pub color: String,
     pub archived: bool,
     pub created_at: String,
+    /// The project this one sits under, if it is a sub-project.
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -401,6 +407,8 @@ pub struct ProjectInput {
     pub color: String,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default)]
+    pub parent_id: Option<i64>,
 }
 
 fn default_color() -> String {
@@ -415,10 +423,30 @@ fn project_from_row(r: &Row) -> rusqlite::Result<Project> {
         color: r.get(3)?,
         archived: r.get::<_, i64>(4)? != 0,
         created_at: r.get(5)?,
+        parent_id: r.get(6)?,
     })
 }
 
-const PROJECT_COLS: &str = "id, name, description, color, archived, created_at";
+const PROJECT_COLS: &str = "id, name, description, color, archived, created_at, parent_id";
+
+/// Rejects a parent that is the project itself or one of its own sub-projects,
+/// which would make the tree loop.
+fn check_parent(conn: &Connection, id: Option<i64>, parent: Option<i64>) -> rusqlite::Result<Option<i64>> {
+    let (Some(id), Some(mut cur)) = (id, parent) else { return Ok(parent) };
+    loop {
+        if cur == id {
+            return Err(rusqlite::Error::ToSqlConversionFailure("A project can't sit under itself or one of its sub-projects.".into()));
+        }
+        match conn
+            .query_row("SELECT parent_id FROM projects WHERE id = ?1", [cur], |r| r.get::<_, Option<i64>>(0))
+            .optional()?
+            .flatten()
+        {
+            Some(next) => cur = next,
+            None => return Ok(parent),
+        }
+    }
+}
 
 pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
     let mut stmt = conn.prepare(&format!(
@@ -429,18 +457,19 @@ pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
 }
 
 pub fn save_project(conn: &Connection, p: ProjectInput) -> rusqlite::Result<Project> {
+    let parent = check_parent(conn, p.id, p.parent_id)?;
     let id = match p.id {
         Some(id) => {
             conn.execute(
-                "UPDATE projects SET name = ?1, description = ?2, color = ?3, archived = ?4 WHERE id = ?5",
-                params![p.name.trim(), p.description, p.color, p.archived as i64, id],
+                "UPDATE projects SET name = ?1, description = ?2, color = ?3, archived = ?4, parent_id = ?5 WHERE id = ?6",
+                params![p.name.trim(), p.description, p.color, p.archived as i64, parent, id],
             )?;
             id
         }
         None => {
             conn.execute(
-                "INSERT INTO projects (name, description, color, archived, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![p.name.trim(), p.description, p.color, p.archived as i64, now()],
+                "INSERT INTO projects (name, description, color, archived, created_at, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![p.name.trim(), p.description, p.color, p.archived as i64, now(), parent],
             )?;
             conn.last_insert_rowid()
         }
@@ -448,8 +477,13 @@ pub fn save_project(conn: &Connection, p: ProjectInput) -> rusqlite::Result<Proj
     conn.query_row(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"), [id], project_from_row)
 }
 
-/// Deletes a project. Its tasks and reminders are kept, unassigned.
+/// Deletes a project. Its tasks and reminders are kept, unassigned, and its
+/// sub-projects move up to the deleted project's parent.
 pub fn delete_project(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE projects SET parent_id = (SELECT parent_id FROM projects WHERE id = ?1) WHERE parent_id = ?1",
+        [id],
+    )?;
     conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
     Ok(())
 }
@@ -1032,13 +1066,37 @@ mod tests {
     #[test]
     fn project_tasks_survive_project_delete() {
         let c = mem();
-        let p = save_project(&c, ProjectInput { id: None, name: " Website ".into(), description: "".into(), color: default_color(), archived: false }).unwrap();
+        let p = save_project(&c, ProjectInput { id: None, name: " Website ".into(), description: "".into(), color: default_color(), archived: false, parent_id: None }).unwrap();
         assert_eq!(p.name, "Website");
         let t = add_todo(&c, NewTodo { title: "Draft copy".into(), notes: "".into(), priority: 2, due_at: None, project_id: Some(p.id) }).unwrap();
         assert_eq!(t.project_id, Some(p.id));
         delete_project(&c, p.id).unwrap();
         assert!(list_projects(&c).unwrap().is_empty());
         assert_eq!(list_todos(&c).unwrap()[0].project_id, None);
+    }
+
+    #[test]
+    fn sub_projects_nest_without_loops() {
+        let c = mem();
+        let mk = |name: &str, parent: Option<i64>| {
+            save_project(&c, ProjectInput { id: None, name: name.into(), description: "".into(), color: default_color(), archived: false, parent_id: parent }).unwrap()
+        };
+        let top = mk("Homelab", None);
+        let mid = mk("Network", Some(top.id));
+        let leaf = mk("Wi-Fi", Some(mid.id));
+        assert_eq!(leaf.parent_id, Some(mid.id));
+
+        // Moving a project under its own descendant, or itself, is refused.
+        let again = |id: i64, parent: i64| {
+            save_project(&c, ProjectInput { id: Some(id), name: "x".into(), description: "".into(), color: default_color(), archived: false, parent_id: Some(parent) })
+        };
+        assert!(again(top.id, leaf.id).is_err());
+        assert!(again(mid.id, mid.id).is_err());
+
+        // Deleting the middle project moves its children up a level.
+        delete_project(&c, mid.id).unwrap();
+        let leaf = list_projects(&c).unwrap().into_iter().find(|p| p.id == leaf.id).unwrap();
+        assert_eq!(leaf.parent_id, Some(top.id));
     }
 
     fn sample_email(remote_id: &str, received_at: &str) -> NewEmail {
@@ -1134,11 +1192,13 @@ mod tests {
     #[test]
     fn migrates_existing_database() {
         let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT); CREATE TABLE reminders (id INTEGER PRIMARY KEY, title TEXT);").unwrap();
+        c.execute_batch("CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT); CREATE TABLE reminders (id INTEGER PRIMARY KEY, title TEXT); \
+             CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, description TEXT, color TEXT, archived INTEGER, created_at TEXT);").unwrap();
         c.execute_batch(SCHEMA).unwrap();
         migrate(&c).unwrap();
         assert!(has_column(&c, "todos", "project_id").unwrap());
         assert!(has_column(&c, "reminders", "project_id").unwrap());
+        assert!(has_column(&c, "projects", "parent_id").unwrap());
         migrate(&c).unwrap();
     }
 

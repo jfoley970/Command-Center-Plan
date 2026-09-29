@@ -356,3 +356,20 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
   letter-spacing: 0.15em;
   margin: 0;
 }
+
+/* Todos widget: todos grouped into an expandable project tree */
+.list.tree li.tree-head { padding: 0; margin-top: 2px; }
+.tree-toggle {
+  display: flex; align-items: center; gap: 0.5rem; flex: 1; min-width: 0; padding: 0.35rem 0.25rem;
+  border: none; background: transparent; color: var(--text-2); font-size: 0.82rem; font-weight: 600; text-align: left;
+}
+.tree-toggle:hover:not(:disabled) { border: none; background: transparent; color: var(--text); }
+.tree-toggle .chevron { color: var(--muted); flex-shrink: 0; transition: transform 0.12s ease; }
+.tree-toggle[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+.tree-toggle .dot { width: 8px; height: 8px; }
+.dot.none { background: transparent; border: 1px dashed var(--muted); }
+.target-chip {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.1rem 0.55rem; border-radius: 999px; font-size: 0.75rem; color: var(--text-2);
+}
+.target-chip .dot { width: 8px; height: 8px; }

@@ -87,6 +87,7 @@ export type Project = {
   color: string;
   archived: boolean;
   created_at: string;
+  parent_id: number | null;
 };
 
 export type Agent = {
