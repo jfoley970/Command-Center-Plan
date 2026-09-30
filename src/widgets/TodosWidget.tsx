@@ -3,6 +3,7 @@ import { api, type Project, type Todo } from "../api";
 import { useData } from "../data";
 import { buildProjectTree, type ProjectNode } from "../projectTree";
 import { formatWhen, isOverdue, isToday } from "../time";
+import TodoDetail from "./TodoDetail";
 import Widget from "./Widget";
 
 export type TodoFilter = "open" | "today" | "overdue" | "done";
@@ -71,10 +72,21 @@ export function applyFilter(todos: Todo[], f: TodoFilter): Todo[] {
 }
 
 export default function TodosWidget({ filter, setFilter }: { filter: TodoFilter; setFilter: (f: TodoFilter) => void }) {
-  const { todos, projects, act } = useData();
+  const { todos, projects, flagLinks, act } = useData();
   const [title, setTitle] = useState("");
   const [target, setTarget] = useState<Project | null>(null);
   const [collapsed, setCollapsed] = useState(loadCollapsed);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const flagged = new Set(flagLinks.map((f) => f.todo_id));
+  const fromEmail = (t: Todo) => t.email_id != null || flagged.has(t.id);
+
+  function setOpen(id: number, open: boolean) {
+    const next = new Set(expanded);
+    if (open) next.add(id);
+    else next.delete(id);
+    setExpanded(next);
+  }
   const shown = applyFilter(todos, filter);
 
   const known = new Set(projects.map((p) => p.id));
@@ -114,8 +126,51 @@ export default function TodosWidget({ filter, setFilter }: { filter: TodoFilter;
   function row(t: Todo, depth: number, color?: string) {
     // Inside a project, the dot and checkbox take the project's color and priority shows as how solid the dot is.
     const style = color ? ({ ...indent(depth), "--proj": color } as CSSProperties) : indent(depth);
-    return (
-      <li key={t.id} className={[t.done ? "done" : "", color ? "in-project" : ""].join(" ").trim()} style={style}>
+    const open = expanded.has(t.id);
+    const email = fromEmail(t);
+    const cls = [t.done && "done", color && "in-project", selected === t.id && "selected"].filter(Boolean).join(" ");
+    const item = (
+      <li
+        key={t.id}
+        className={cls}
+        style={style}
+        tabIndex={0}
+        aria-selected={selected === t.id}
+        aria-expanded={open}
+        onClick={(e) => {
+          // Clicks on the row's own controls don't change the selection.
+          if ((e.target as HTMLElement).closest("button, input, textarea, a")) return;
+          setSelected(t.id);
+        }}
+        onFocus={(e) => e.target === e.currentTarget && setSelected(t.id)}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen(t.id, !open);
+          } else if (e.key === "ArrowRight") setOpen(t.id, true);
+          else if (e.key === "ArrowLeft") setOpen(t.id, false);
+          else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            const rows = [...(e.currentTarget.closest("ul")?.querySelectorAll<HTMLElement>("li[tabindex]") ?? [])];
+            rows[rows.indexOf(e.currentTarget) + (e.key === "ArrowDown" ? 1 : -1)]?.focus();
+          }
+        }}
+      >
+        <button
+          className="expand-btn"
+          aria-label={open ? `Hide details for ${t.title}` : `Show details for ${t.title}`}
+          aria-expanded={open}
+          tabIndex={-1}
+          onClick={() => {
+            setSelected(t.id);
+            setOpen(t.id, !open);
+          }}
+        >
+          <svg className="chevron" viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+            <path d="M4 2.5 7.5 6 4 9.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
         <input
           type="checkbox"
           checked={t.done}
@@ -128,7 +183,16 @@ export default function TodosWidget({ filter, setFilter }: { filter: TodoFilter;
           aria-label={`${PRIORITY[t.priority]} priority, change`}
           onClick={() => act(() => api.setTodoPriority(t.id, (t.priority % 3) + 1))}
         />
+        {email && (
+          <span className="mail-mark" title="From an email" aria-label="From an email">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+              <rect x="2" y="3.5" width="12" height="9" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+              <path d="m2.5 4.5 5.5 4 5.5-4" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            </svg>
+          </span>
+        )}
         <span className="grow truncate" title={t.title}>{t.title}</span>
+        {!open && t.notes && !email && <span className="notes-mark" title={t.notes}>notes</span>}
         {t.due_at && !t.done && (
           <span className={isOverdue(t.due_at) ? "tag critical" : "tag"}>
             {isOverdue(t.due_at) && "! "}
@@ -140,6 +204,13 @@ export default function TodosWidget({ filter, setFilter }: { filter: TodoFilter;
         </button>
       </li>
     );
+    if (!open) return item;
+    return [
+      item,
+      <li key={`d-${t.id}`} className="detail-row" style={{ ...style, paddingLeft: `${1.6 + depth * 1.1}rem` }}>
+        <TodoDetail todo={t} fromEmail={email} />
+      </li>,
+    ];
   }
 
   function header(key: string, label: string, count: number, depth: number, color?: string, project?: Project) {
@@ -163,9 +234,9 @@ export default function TodosWidget({ filter, setFilter }: { filter: TodoFilter;
     );
   }
 
-  function group(g: Group): ReactElement[] {
+  function group(g: Group): (ReactElement | ReactElement[])[] {
     const key = `p:${g.project.id}`;
-    const rows = [header(key, g.project.name, g.total, g.depth, g.project.color, g.project)];
+    const rows: (ReactElement | ReactElement[])[] = [header(key, g.project.name, g.total, g.depth, g.project.color, g.project)];
     if (!collapsed.has(key)) {
       rows.push(...g.children.flatMap(group), ...g.todos.map((t) => row(t, g.depth + 1, g.project.color)));
     }
