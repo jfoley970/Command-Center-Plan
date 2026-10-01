@@ -14,6 +14,9 @@ use crate::{db, Core};
 
 const API: &str = "https://api.cursor.com/v0/agents";
 const POLL_SECS: u64 = 30;
+/// Right after a follow-up, Cursor may still report the previous turn as
+/// finished; give it this long before trusting a finished status.
+const GRACE_SECS: i64 = 45;
 
 pub struct Launched {
     pub id: String,
@@ -91,6 +94,46 @@ pub async fn launch(api_key: &str, repo: &str, prompt: &str) -> Result<Launched,
     Ok(Launched { id, link })
 }
 
+/// One message in an agent's conversation: what was asked, or what Cursor said.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct Message {
+    /// "you" or "cursor".
+    pub from: &'static str,
+    pub text: String,
+}
+
+fn parse_conversation(v: &Value) -> Vec<Message> {
+    v["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let text = m["text"].as_str()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let from = if m["type"] == "user_message" { "you" } else { "cursor" };
+            Some(Message { from, text: text.to_string() })
+        })
+        .collect()
+}
+
+pub async fn conversation(api_key: &str, id: &str) -> Result<Vec<Message>, String> {
+    let v = request(api_key, reqwest::Client::new().get(format!("{API}/{id}/conversation"))).await?;
+    Ok(parse_conversation(&v))
+}
+
+pub async fn followup(api_key: &str, id: &str, text: &str) -> Result<(), String> {
+    let body = json!({ "prompt": { "text": text } });
+    request(api_key, reqwest::Client::new().post(format!("{API}/{id}/followup")).json(&body)).await?;
+    Ok(())
+}
+
+pub async fn stop(api_key: &str, id: &str) -> Result<(), String> {
+    request(api_key, reqwest::Client::new().post(format!("{API}/{id}/stop"))).await?;
+    Ok(())
+}
+
 pub async fn progress(api_key: &str, id: &str) -> Result<Progress, String> {
     let v = request(api_key, reqwest::Client::new().get(format!("{API}/{id}"))).await?;
     Ok(parse_progress(&v))
@@ -114,9 +157,14 @@ async fn poll_once(core: &Arc<Core>) -> Result<(), String> {
     let Some(key) = core.secrets.get(CURSOR_KEY)? else {
         return Ok(());
     };
-    for (run_id, agent_name, external_id) in running {
+    let now = chrono::Utc::now();
+    for (run_id, agent_name, external_id, started_at) in running {
+        let fresh = chrono::DateTime::parse_from_rfc3339(&started_at)
+            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds() < GRACE_SECS)
+            .unwrap_or(false);
         let (status, output, link) = match progress(&key, &external_id).await {
             Ok(Progress::Running) => continue,
+            Ok(_) if fresh => continue,
             Ok(Progress::Done { summary, link }) => ("done", summary, link),
             Ok(Progress::Failed(why)) => ("error", why, String::new()),
             Err(e) => {
@@ -149,6 +197,23 @@ mod tests {
         assert_eq!(b["prompt"]["text"], "fix it");
         assert_eq!(b["source"]["repository"], "https://github.com/a/b");
         assert_eq!(b["target"]["autoCreatePr"], true);
+    }
+
+    #[test]
+    fn conversation_keeps_who_said_what() {
+        let v = json!({ "id": "bc-1", "messages": [
+            { "id": "1", "type": "user_message", "text": "Add a README" },
+            { "id": "2", "type": "assistant_message", "text": "Reading the repository" },
+            { "id": "3", "type": "assistant_message", "text": "  " }
+        ]});
+        assert_eq!(
+            parse_conversation(&v),
+            vec![
+                Message { from: "you", text: "Add a README".into() },
+                Message { from: "cursor", text: "Reading the repository".into() }
+            ]
+        );
+        assert!(parse_conversation(&json!({})).is_empty());
     }
 
     #[test]

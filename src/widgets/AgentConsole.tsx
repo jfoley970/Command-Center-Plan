@@ -4,9 +4,10 @@ import { routeCommand } from "../agentRoute";
 import { useData } from "../data";
 import { formatWhen } from "../time";
 import { openUrl } from "../transport";
+import CursorRun from "./CursorRun";
 import Widget from "./Widget";
 
-const STATUS_LABEL = { running: "Running", error: "Error", refused: "Declined", done: "" } as const;
+const STATUS_LABEL = { running: "Running", error: "Error", refused: "Declined", stopped: "Stopped", done: "" } as const;
 
 /**
  * Every AI you use in one place: who's connected and working, a box to ask any
@@ -170,7 +171,7 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
                   {run.input !== "(no extra input)" && ` · “${run.input}”`}
                 </span>
                 {run.status !== "done" && (
-                  <span className={`tag ${run.status === "running" ? "" : "critical"}`}>{STATUS_LABEL[run.status]}</span>
+                  <span className={`tag ${run.status === "running" || run.status === "stopped" ? "" : "critical"}`}>{STATUS_LABEL[run.status]}</span>
                 )}
               </div>
               {run.status === "running" ? (
@@ -190,6 +191,7 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
                   </button>
                 </div>
               )}
+              {run.external_id && <CursorRun key={run.id} run={run} />}
             </>
           )}
         </div>

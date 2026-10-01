@@ -195,7 +195,7 @@ export default function Agents({ selectedId, onSelect }: { selectedId: number | 
 }
 
 export function RunCard({ run }: { run: AgentRun }) {
-  const label = { running: "Running", done: "Done", error: "Error", refused: "Declined" }[run.status];
+  const label = { running: "Running", done: "Done", error: "Error", refused: "Declined", stopped: "Stopped" }[run.status];
   return (
     <div className="run">
       <div className="row between muted small">

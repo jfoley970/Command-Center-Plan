@@ -38,6 +38,12 @@ struct AccountId {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunId {
+    run_id: i64,
+}
+
+#[derive(Deserialize)]
 struct Key {
     key: String,
 }
@@ -228,6 +234,36 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             let A { agent_id, input } = args(a)?;
             ok(run_agent(core, agent_id, input).await?)
         }
+        "cursor_conversation" => {
+            let (_, remote, key) = cursor_run(core, args::<RunId>(a)?.run_id)?;
+            ok(cursor::conversation(&key, &remote).await?)
+        }
+        "cursor_followup" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                run_id: i64,
+                text: String,
+            }
+            let A { run_id, text } = args(a)?;
+            if text.trim().is_empty() {
+                return Err("Type what Cursor should do next.".into());
+            }
+            let (run, remote, key) = cursor_run(core, run_id)?;
+            cursor::followup(&key, &remote, text.trim()).await?;
+            let id = db::start_followup_run(&conn(), run.agent_id, text.trim(), &remote, &run.link).map_err(err)?;
+            core.changed("runs-changed");
+            ok(db::get_run(&conn(), id).map_err(err)?)
+        }
+        "cursor_stop" => {
+            let (run, remote, key) = cursor_run(core, args::<RunId>(a)?.run_id)?;
+            cursor::stop(&key, &remote).await?;
+            if run.status == "running" {
+                db::finish_external_run(&conn(), run.id, "stopped", "You stopped this run.", "").map_err(err)?;
+            }
+            core.changed("runs-changed");
+            ok(())
+        }
         "list_providers" => ok(providers::statuses(&core.secrets)?),
         "set_provider_key" => {
             #[derive(Deserialize)]
@@ -311,6 +347,14 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
 
         _ => Err(format!("Unknown command: {command}")),
     }
+}
+
+/// A Cursor run, its remote agent id and the Cursor key.
+fn cursor_run(core: &Arc<Core>, run_id: i64) -> CmdResult<(db::AgentRun, String, String)> {
+    let run = db::get_run(&core.db.0.lock().unwrap(), run_id).map_err(err)?.ok_or("That run no longer exists.")?;
+    let remote = run.external_id.clone().ok_or("This run isn't a Cursor agent.")?;
+    let key = core.secrets.get(crate::secrets::CURSOR_KEY)?.ok_or("Add your Cursor key in Settings > Connections.")?;
+    Ok((run, remote, key))
 }
 
 /// Gives agents the same picture of the day the dashboard shows.

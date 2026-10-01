@@ -133,7 +133,7 @@ export type AgentRun = {
   provider: ProviderId;
   input: string;
   output: string;
-  status: "running" | "done" | "error" | "refused";
+  status: "running" | "done" | "error" | "refused" | "stopped";
   model: string;
   input_tokens: number;
   output_tokens: number;
@@ -141,7 +141,11 @@ export type AgentRun = {
   finished_at: string | null;
   /** Where to see the result outside the app, such as a pull request. */
   link: string;
+  /** The remote agent working on a background run (Cursor). */
+  external_id: string | null;
 };
+
+export type CursorMessage = { from: "you" | "cursor"; text: string };
 
 export type ModelOption = { id: string; label: string };
 
@@ -191,6 +195,9 @@ export const api = {
   setProviderKey: (provider: ProviderId, key: string) => call<void>("set_provider_key", { provider, key }),
   /** Asks a provider directly, using its first agent (made on first use). */
   askProvider: (provider: ProviderId, input: string) => call<AgentRun>("ask_provider", { provider, input }),
+  cursorConversation: (runId: number) => call<CursorMessage[]>("cursor_conversation", { runId }),
+  cursorFollowup: (runId: number, text: string) => call<AgentRun>("cursor_followup", { runId, text }),
+  cursorStop: (runId: number) => call<void>("cursor_stop", { runId }),
 
   hasApiKey: () => call<boolean>("has_api_key"),
   setApiKey: (key: string) => call<void>("set_api_key", { key }),
