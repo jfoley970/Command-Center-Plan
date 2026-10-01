@@ -10,6 +10,9 @@ use std::sync::Mutex;
 pub const CLAUDE_KEY: &str = "anthropic-api-key";
 pub const ATERA_KEY: &str = "atera-api-key";
 pub const UNIFI_KEY: &str = "unifi-site-manager-api-key";
+pub const OPENAI_KEY: &str = "openai-api-key";
+pub const XAI_KEY: &str = "xai-api-key";
+pub const CURSOR_KEY: &str = "cursor-api-key";
 
 pub fn mail_token_name(email: &str) -> String {
     format!("ms-refresh:{}", email.to_lowercase())
@@ -34,6 +37,9 @@ impl Secrets {
             CLAUDE_KEY => Some("ANTHROPIC_API_KEY"),
             ATERA_KEY => Some("ATERA_API_KEY"),
             UNIFI_KEY => Some("UNIFI_API_KEY"),
+            OPENAI_KEY => Some("OPENAI_API_KEY"),
+            XAI_KEY => Some("XAI_API_KEY"),
+            CURSOR_KEY => Some("CURSOR_API_KEY"),
             _ => None,
         }
     }

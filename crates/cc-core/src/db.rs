@@ -159,6 +159,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "projects", "parent_id")? {
         conn.execute_batch("ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id) ON DELETE SET NULL")?;
     }
+    // Agents on other providers. Agents made before this were all Claude agents
+    // that read the day's todos and reminders, so the defaults keep that.
+    for (column, def) in [("provider", "TEXT NOT NULL DEFAULT 'claude'"), ("repo", "TEXT NOT NULL DEFAULT ''"), ("include_context", "INTEGER NOT NULL DEFAULT 1")] {
+        if !has_column(conn, "agents", column)? {
+            conn.execute_batch(&format!("ALTER TABLE agents ADD COLUMN {column} {def}"))?;
+        }
+    }
+    // Background runs (Cursor) keep the remote agent's id until they finish.
+    for (column, def) in [("external_id", "TEXT"), ("link", "TEXT NOT NULL DEFAULT ''")] {
+        if !has_column(conn, "agent_runs", column)? {
+            conn.execute_batch(&format!("ALTER TABLE agent_runs ADD COLUMN {column} {def}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -980,6 +993,19 @@ pub struct Agent {
     pub system_prompt: String,
     pub model: String,
     pub created_at: String,
+    pub provider: String,
+    /// GitHub repository a Cursor agent works on.
+    pub repo: String,
+    /// Whether runs include the day's open todos and reminders.
+    pub include_context: bool,
+}
+
+fn default_provider() -> String {
+    "claude".into()
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize, Debug)]
@@ -988,8 +1014,15 @@ pub struct AgentInput {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub system_prompt: String,
     pub model: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default = "yes")]
+    pub include_context: bool,
 }
 
 fn agent_from_row(r: &Row) -> rusqlite::Result<Agent> {
@@ -1000,10 +1033,13 @@ fn agent_from_row(r: &Row) -> rusqlite::Result<Agent> {
         system_prompt: r.get(3)?,
         model: r.get(4)?,
         created_at: r.get(5)?,
+        provider: r.get(6)?,
+        repo: r.get(7)?,
+        include_context: r.get::<_, i64>(8)? != 0,
     })
 }
 
-const AGENT_COLS: &str = "id, name, description, system_prompt, model, created_at";
+const AGENT_COLS: &str = "id, name, description, system_prompt, model, created_at, provider, repo, include_context";
 
 pub fn list_agents(conn: &Connection) -> rusqlite::Result<Vec<Agent>> {
     let mut stmt = conn.prepare(&format!("SELECT {AGENT_COLS} FROM agents ORDER BY name"))?;
@@ -1024,15 +1060,16 @@ pub fn save_agent(conn: &Connection, a: AgentInput) -> rusqlite::Result<Agent> {
     let id = match a.id {
         Some(id) => {
             conn.execute(
-                "UPDATE agents SET name = ?1, description = ?2, system_prompt = ?3, model = ?4 WHERE id = ?5",
-                params![a.name.trim(), a.description, a.system_prompt, a.model, id],
+                "UPDATE agents SET name = ?1, description = ?2, system_prompt = ?3, model = ?4, provider = ?5, repo = ?6, include_context = ?7 WHERE id = ?8",
+                params![a.name.trim(), a.description, a.system_prompt, a.model, a.provider, a.repo.trim(), a.include_context, id],
             )?;
             id
         }
         None => {
             conn.execute(
-                "INSERT INTO agents (name, description, system_prompt, model, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![a.name.trim(), a.description, a.system_prompt, a.model, now()],
+                "INSERT INTO agents (name, description, system_prompt, model, provider, repo, include_context, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![a.name.trim(), a.description, a.system_prompt, a.model, a.provider, a.repo.trim(), a.include_context, now()],
             )?;
             conn.last_insert_rowid()
         }
@@ -1050,6 +1087,7 @@ pub struct AgentRun {
     pub id: i64,
     pub agent_id: i64,
     pub agent_name: String,
+    pub provider: String,
     pub input: String,
     pub output: String,
     pub status: String,
@@ -1058,6 +1096,8 @@ pub struct AgentRun {
     pub output_tokens: i64,
     pub started_at: String,
     pub finished_at: Option<String>,
+    /// Where to see the result outside the app, such as a pull request.
+    pub link: String,
 }
 
 pub fn start_run(conn: &Connection, agent_id: i64, input: &str) -> rusqlite::Result<i64> {
@@ -1086,7 +1126,7 @@ pub fn finish_run(
 
 pub fn list_runs(conn: &Connection, agent_id: Option<i64>, limit: i64) -> rusqlite::Result<Vec<AgentRun>> {
     let mut stmt = conn.prepare(
-        "SELECT r.id, r.agent_id, a.name, r.input, r.output, r.status, r.model, r.input_tokens, r.output_tokens, r.started_at, r.finished_at
+        "SELECT r.id, r.agent_id, a.name, a.provider, r.input, r.output, r.status, r.model, r.input_tokens, r.output_tokens, r.started_at, r.finished_at, r.link
          FROM agent_runs r JOIN agents a ON a.id = r.agent_id
          WHERE (?1 IS NULL OR r.agent_id = ?1)
          ORDER BY r.id DESC LIMIT ?2",
@@ -1096,24 +1136,52 @@ pub fn list_runs(conn: &Connection, agent_id: Option<i64>, limit: i64) -> rusqli
             id: r.get(0)?,
             agent_id: r.get(1)?,
             agent_name: r.get(2)?,
-            input: r.get(3)?,
-            output: r.get(4)?,
-            status: r.get(5)?,
-            model: r.get(6)?,
-            input_tokens: r.get(7)?,
-            output_tokens: r.get(8)?,
-            started_at: r.get(9)?,
-            finished_at: r.get(10)?,
+            provider: r.get(3)?,
+            input: r.get(4)?,
+            output: r.get(5)?,
+            status: r.get(6)?,
+            model: r.get(7)?,
+            input_tokens: r.get(8)?,
+            output_tokens: r.get(9)?,
+            started_at: r.get(10)?,
+            finished_at: r.get(11)?,
+            link: r.get(12)?,
         })
     })?;
     rows.collect()
 }
 
-/// Runs left as "running" when the app last closed never finished.
+/// Runs left as "running" when the app last closed never finished. Background
+/// runs carry on remotely, so those are left for the poll loop.
 pub fn mark_orphaned_runs(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE agent_runs SET status = 'error', output = 'Interrupted: the app closed before this run finished.', finished_at = ?1 WHERE status = 'running'",
+        "UPDATE agent_runs SET status = 'error', output = 'Interrupted: the app closed before this run finished.', finished_at = ?1
+         WHERE status = 'running' AND external_id IS NULL",
         [now()],
+    )?;
+    Ok(())
+}
+
+/// Records the remote agent a background run started.
+pub fn set_run_external(conn: &Connection, run_id: i64, external_id: &str, link: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE agent_runs SET external_id = ?1, link = ?2 WHERE id = ?3", params![external_id, link, run_id])?;
+    Ok(())
+}
+
+/// Background runs still working: (run id, agent name, remote id).
+pub fn list_external_runs(conn: &Connection) -> rusqlite::Result<Vec<(i64, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, a.name, r.external_id FROM agent_runs r JOIN agents a ON a.id = r.agent_id
+         WHERE r.status = 'running' AND r.external_id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect()
+}
+
+pub fn finish_external_run(conn: &Connection, run_id: i64, status: &str, output: &str, link: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_runs SET status = ?1, output = ?2, link = CASE WHEN ?3 = '' THEN link ELSE ?3 END, finished_at = ?4 WHERE id = ?5",
+        params![status, output, link, now(), run_id],
     )?;
     Ok(())
 }
@@ -1344,10 +1412,18 @@ mod tests {
         let c = mem();
         let agents = list_agents(&c).unwrap();
         assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].provider, "claude");
+        assert!(agents[0].include_context);
         let run = start_run(&c, agents[0].id, "hi").unwrap();
+        let remote = start_run(&c, agents[0].id, "in the cloud").unwrap();
+        set_run_external(&c, remote, "bc-1", "https://cursor.example/1").unwrap();
         mark_orphaned_runs(&c).unwrap();
+        assert_eq!(list_external_runs(&c).unwrap(), vec![(remote, "Daily Planner".to_string(), "bc-1".to_string())]);
+        finish_external_run(&c, remote, "done", "Opened a PR", "").unwrap();
+        assert!(list_external_runs(&c).unwrap().is_empty());
         let runs = list_runs(&c, None, 10).unwrap();
-        assert_eq!(runs[0].id, run);
-        assert_eq!(runs[0].status, "error");
+        assert_eq!((runs[0].id, runs[0].status.as_str(), runs[0].link.as_str()), (remote, "done", "https://cursor.example/1"));
+        assert_eq!(runs[1].id, run);
+        assert_eq!(runs[1].status, "error");
     }
 }
