@@ -22,6 +22,7 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
   const [input, setInput] = useState("");
   const [shown, setShown] = useState<number | null>(null);
   const [picked, setPicked] = useState<ProviderId | null>(null);
+  const [repo, setRepo] = useState("");
 
   const current = agents.find((a) => a.id === agentId);
   const providerId: ProviderId = picked ?? current?.provider ?? "claude";
@@ -61,7 +62,29 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
     }
   }
 
-  const ready = provider?.connected && !provider.unavailable;
+  // Cursor needs a repository before it can run, so offer to set one up here.
+  async function createRepoAgent(e: FormEvent) {
+    e.preventDefault();
+    if (!provider) return;
+    const saved = await act(() =>
+      api.saveAgent({
+        name: provider.name,
+        description: `Works on ${repo.trim()}`,
+        system_prompt: "",
+        model: provider.models[0]?.id ?? "auto",
+        provider: provider.id,
+        repo: repo.trim(),
+        include_context: false,
+      }),
+    );
+    if (saved) {
+      setRepo("");
+      setAgentId(saved.id);
+    }
+  }
+
+  const needsRepo = !!provider?.background && !agent;
+  const ready = provider?.connected && !provider.unavailable && !needsRepo;
   const name = agent?.name ?? provider?.name ?? "an agent";
 
   return (
@@ -122,13 +145,23 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
               <span>{provider.name} isn't connected yet. Paste its API key in Settings &gt; Connections.</span>
               <div><button onClick={onOpenSettings}>Connect {provider.name}</button></div>
             </div>
+          ) : needsRepo && provider ? (
+            <form className="empty stack-tight" onSubmit={createRepoAgent}>
+              <span>Which GitHub repository should {provider.name} work on?</span>
+              <div className="form-row">
+                <input
+                  className="grow"
+                  value={repo}
+                  onChange={(e) => setRepo(e.target.value)}
+                  placeholder="owner/repo"
+                  aria-label={`Repository for ${provider.name}`}
+                />
+                <button type="submit" disabled={!repo.includes("/")}>Set up {provider.name}</button>
+              </div>
+              <span className="muted small">You can add more agents for other repositories under Manage.</span>
+            </form>
           ) : !run ? (
-            <p className="empty">
-              {agent?.description ||
-                (provider?.background
-                  ? `Make a ${provider.name} agent under Manage and give it a repository to work on.`
-                  : `Ask ${provider?.name ?? "an agent"} anything.`)}
-            </p>
+            <p className="empty">{agent?.description || `Ask ${provider?.name ?? "an agent"} anything.`}</p>
           ) : (
             <>
               <div className="row between muted small">
