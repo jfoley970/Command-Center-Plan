@@ -274,6 +274,16 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 /* Agent console */
 .console { display: flex; flex-direction: column; gap: 8px; height: 100%; }
 .console-input { display: flex; gap: 6px; }
+.cursor-run { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.cursor-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.cursor-steps .step { display: flex; gap: 8px; font-size: 0.85rem; }
+.cursor-steps .step-from { flex: 0 0 52px; color: var(--muted); font-size: 0.75rem; padding-top: 1px; }
+.cursor-steps .step-text { white-space: pre-wrap; color: var(--text-2); }
+.cursor-steps .step.you .step-text { color: var(--text); }
+button.danger { color: var(--p1); }
+.ai-strip { display: flex; gap: 6px; flex-wrap: wrap; }
+.ai-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 0.2rem 0.65rem; border-radius: 999px; color: var(--text-2); }
+.ai-chip.active { color: var(--text); border-color: var(--accent); background: rgba(57, 135, 229, 0.12); }
 .console-input input { flex: 1; min-width: 0; }
 .console-output { flex: 1; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-height: 60px; }
 .run-output { white-space: pre-wrap; line-height: 1.5; }

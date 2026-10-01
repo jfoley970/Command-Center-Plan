@@ -50,11 +50,12 @@ registerConnector({
   id: "claude",
   name: "Claude API",
   group: "AI",
-  description: "Runs your agents and writes the email digests.",
+  description: "Runs your Claude agents and writes the email digests.",
   useStatus: () => {
     const { hasKey, agents } = useData();
+    const n = agents.filter((a) => a.provider === "claude").length;
     return hasKey
-      ? { state: "connected", detail: `Key saved · ${agents.length} agent${agents.length === 1 ? "" : "s"}` }
+      ? { state: "connected", detail: `Key saved · ${n} agent${n === 1 ? "" : "s"}` }
       : { state: "off", detail: "Add an API key to run agents" };
   },
   Panel: ClaudePanel,

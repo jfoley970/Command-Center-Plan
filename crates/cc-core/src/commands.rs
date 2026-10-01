@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::secrets::CLAUDE_KEY;
-use crate::{atera, claude, db, mail, unifi, Core};
+use crate::{atera, claude, cursor, db, mail, openai, providers, unifi, Core};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -35,6 +35,12 @@ struct Id {
 #[serde(rename_all = "camelCase")]
 struct AccountId {
     account_id: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunId {
+    run_id: i64,
 }
 
 #[derive(Deserialize)]
@@ -193,8 +199,17 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
                 agent: db::AgentInput,
             }
             let A { agent } = args(a)?;
-            if agent.name.trim().is_empty() || agent.system_prompt.trim().is_empty() {
-                return Err("An agent needs a name and instructions.".into());
+            let provider = providers::find(&agent.provider).ok_or("Unknown AI provider.")?;
+            if let Some(why) = provider.unavailable {
+                return Err(why.into());
+            }
+            if agent.name.trim().is_empty() {
+                return Err("An agent needs a name.".into());
+            }
+            if provider.background {
+                cursor::normalize_repo(&agent.repo)?;
+            } else if agent.system_prompt.trim().is_empty() {
+                return Err("An agent needs instructions.".into());
             }
             ok(db::save_agent(&conn(), agent).map_err(err)?)
         }
@@ -217,6 +232,74 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
                 input: String,
             }
             let A { agent_id, input } = args(a)?;
+            ok(run_agent(core, agent_id, input).await?)
+        }
+        "cursor_conversation" => {
+            let (_, remote, key) = cursor_run(core, args::<RunId>(a)?.run_id)?;
+            ok(cursor::conversation(&key, &remote).await?)
+        }
+        "cursor_followup" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                run_id: i64,
+                text: String,
+            }
+            let A { run_id, text } = args(a)?;
+            if text.trim().is_empty() {
+                return Err("Type what Cursor should do next.".into());
+            }
+            let (run, remote, key) = cursor_run(core, run_id)?;
+            cursor::followup(&key, &remote, text.trim()).await?;
+            let id = db::start_followup_run(&conn(), run.agent_id, text.trim(), &remote, &run.link).map_err(err)?;
+            core.changed("runs-changed");
+            ok(db::get_run(&conn(), id).map_err(err)?)
+        }
+        "cursor_stop" => {
+            let (run, remote, key) = cursor_run(core, args::<RunId>(a)?.run_id)?;
+            cursor::stop(&key, &remote).await?;
+            if run.status == "running" {
+                db::finish_external_run(&conn(), run.id, "stopped", "You stopped this run.", "").map_err(err)?;
+            }
+            core.changed("runs-changed");
+            ok(())
+        }
+        "list_providers" => ok(providers::statuses(&core.secrets)?),
+        "set_provider_key" => {
+            #[derive(Deserialize)]
+            struct A {
+                provider: String,
+                key: String,
+            }
+            let A { provider, key } = args(a)?;
+            let name = providers::find(&provider).and_then(|p| p.key).ok_or("That provider doesn't take a key.")?;
+            core.secrets.set(name, &key)?;
+            core.changed("providers-changed");
+            ok(())
+        }
+        "ask_provider" => {
+            // "chatgpt: ..." from the dashboard: use the provider's first agent,
+            // making a plain one the first time.
+            #[derive(Deserialize)]
+            struct A {
+                provider: String,
+                input: String,
+            }
+            let A { provider, input } = args(a)?;
+            let p = providers::find(&provider).ok_or("Unknown AI provider.")?;
+            if let Some(why) = p.unavailable {
+                return Err(why.into());
+            }
+            let agent_id = {
+                let c = conn();
+                match db::list_agents(&c).map_err(err)?.into_iter().find(|a| a.provider == p.id) {
+                    Some(a) => a.id,
+                    None if p.background => {
+                        return Err(format!("Make a {} agent under Agents first, so it knows which repository to work on.", p.name))
+                    }
+                    None => db::save_agent(&c, providers::quick_agent(p)).map_err(err)?.id,
+                }
+            };
             ok(run_agent(core, agent_id, input).await?)
         }
 
@@ -266,6 +349,14 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
     }
 }
 
+/// A Cursor run, its remote agent id and the Cursor key.
+fn cursor_run(core: &Arc<Core>, run_id: i64) -> CmdResult<(db::AgentRun, String, String)> {
+    let run = db::get_run(&core.db.0.lock().unwrap(), run_id).map_err(err)?.ok_or("That run no longer exists.")?;
+    let remote = run.external_id.clone().ok_or("This run isn't a Cursor agent.")?;
+    let key = core.secrets.get(crate::secrets::CURSOR_KEY)?.ok_or("Add your Cursor key in Settings > Connections.")?;
+    Ok((run, remote, key))
+}
+
 /// Gives agents the same picture of the day the dashboard shows.
 fn day_context(conn: &rusqlite::Connection) -> CmdResult<String> {
     let todos = db::list_todos(conn).map_err(err)?;
@@ -289,24 +380,53 @@ fn day_context(conn: &rusqlite::Connection) -> CmdResult<String> {
 }
 
 async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) -> CmdResult<db::AgentRun> {
-    let api_key = core.secrets.get(CLAUDE_KEY)?.ok_or("Add your Claude API key in Settings before running an agent.")?;
+    let agent = db::get_agent(&core.db.0.lock().unwrap(), agent_id).map_err(err)?.ok_or("That agent no longer exists.")?;
+    let provider = providers::find(&agent.provider).ok_or("This agent's AI provider isn't supported.")?;
+    if let Some(why) = provider.unavailable {
+        return Err(why.into());
+    }
+    let key_name = provider.key.ok_or("This provider doesn't take a key.")?;
+    let api_key = core
+        .secrets
+        .get(key_name)?
+        .ok_or_else(|| format!("Add your {} key in Settings > Connections before running this agent.", provider.name))?;
+    if provider.background && input.trim().is_empty() && agent.system_prompt.trim().is_empty() {
+        return Err(format!("Tell {} what to do first.", provider.name));
+    }
 
     // Hold the lock only for database work, never across the network call.
-    let (agent, run_id, context) = {
+    let (run_id, context) = {
         let conn = core.db.0.lock().unwrap();
-        let agent = db::get_agent(&conn, agent_id).map_err(err)?.ok_or("That agent no longer exists.")?;
         let input_label = if input.trim().is_empty() { "(no extra input)" } else { input.trim() };
         let run_id = db::start_run(&conn, agent_id, input_label).map_err(err)?;
-        (agent, run_id, day_context(&conn)?)
+        let context = if agent.include_context { day_context(&conn)? } else { String::new() };
+        (run_id, context)
     };
     core.changed("runs-changed");
 
-    let user = if input.trim().is_empty() {
-        context
-    } else {
-        format!("{context}\n\nRequest:\n{}", input.trim())
+    let user = match (context.is_empty(), input.trim().is_empty()) {
+        (true, _) => input.trim().to_string(),
+        (false, true) => context,
+        (false, false) => format!("{context}\n\nRequest:\n{}", input.trim()),
     };
-    let result = claude::complete(&api_key, &agent.model, &agent.system_prompt, &user).await;
+
+    if provider.background {
+        // Cursor works on its own; the poll loop records how it ends.
+        let prompt = [agent.system_prompt.trim(), user.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
+        let conn = || core.db.0.lock().unwrap();
+        match cursor::launch(&api_key, &agent.repo, &prompt).await {
+            Ok(l) => db::set_run_external(&conn(), run_id, &l.id, &l.link).map_err(err)?,
+            Err(e) => db::finish_run(&conn(), run_id, "error", &e, &agent.model, 0, 0).map_err(err)?,
+        }
+        core.changed("runs-changed");
+        return Ok(db::list_runs(&conn(), Some(agent_id), 1).map_err(err)?.remove(0));
+    }
+
+    let result = match provider.id {
+        "chatgpt" => openai::chatgpt(&api_key, &agent.model, &agent.system_prompt, &user).await,
+        "grok" => openai::grok(&api_key, &agent.model, &agent.system_prompt, &user).await,
+        _ => claude::complete(&api_key, &agent.model, &agent.system_prompt, &user).await,
+    };
 
     let run = {
         let conn = core.db.0.lock().unwrap();
@@ -365,6 +485,32 @@ mod tests {
             assert_eq!(call(&core, "has_api_key", Value::Null).await.unwrap(), json!(false));
             call(&core, "set_api_key", json!({ "key": "sk-test" })).await.unwrap();
             assert_eq!(call(&core, "has_api_key", Value::Null).await.unwrap(), json!(true));
+        }
+        std::fs::remove_dir_all(&core.data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn providers_route_and_validate() {
+        let core = core();
+        let e = call(&core, "ask_provider", json!({ "provider": "copilot", "input": "hi" })).await.unwrap_err();
+        assert!(e.contains("Copilot license"));
+        let e = call(&core, "ask_provider", json!({ "provider": "cursor", "input": "fix it" })).await.unwrap_err();
+        assert!(e.contains("repository"));
+        let bad = json!({ "agent": { "name": "Bugfixer", "model": "auto", "provider": "cursor", "repo": "nope" } });
+        assert!(call(&core, "save_agent", bad).await.is_err());
+        let good = json!({ "agent": { "name": "Bugfixer", "model": "auto", "provider": "cursor", "repo": "jfoley970/Command-Center-Plan" } });
+        assert_eq!(call(&core, "save_agent", good).await.unwrap()["provider"], "cursor");
+
+        if std::env::var("XAI_API_KEY").is_err() {
+            // No key: the quick Grok agent is made, then the run explains what's missing.
+            let e = call(&core, "ask_provider", json!({ "provider": "grok", "input": "hi" })).await.unwrap_err();
+            assert!(e.contains("Grok key"));
+            let agents = call(&core, "list_agents", Value::Null).await.unwrap();
+            let grok = agents.as_array().unwrap().iter().find(|a| a["provider"] == "grok").unwrap();
+            assert_eq!(grok["include_context"], false);
+            call(&core, "set_provider_key", json!({ "provider": "grok", "key": "xai-test" })).await.unwrap();
+            let st = call(&core, "list_providers", Value::Null).await.unwrap();
+            assert!(st.as_array().unwrap().iter().any(|p| p["id"] == "grok" && p["connected"] == true));
         }
         std::fs::remove_dir_all(&core.data_dir).unwrap();
     }
