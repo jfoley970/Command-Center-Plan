@@ -493,6 +493,8 @@ struct FlaggedGraphMessage {
     id: String,
     subject: Option<String>,
     from: Option<Recipient>,
+    received_date_time: Option<String>,
+    body_preview: Option<String>,
     web_link: Option<String>,
     flag: Option<Flag>,
 }
@@ -524,7 +526,7 @@ async fn fetch_flagged(token: &str) -> Result<Vec<db::FlaggedMessage>, String> {
         &[
             ("$filter", "flag/flagStatus eq 'flagged'"),
             ("$top", "200"),
-            ("$select", "id,subject,from,webLink,flag"),
+            ("$select", "id,subject,from,receivedDateTime,bodyPreview,webLink,flag"),
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -533,14 +535,17 @@ async fn fetch_flagged(token: &str) -> Result<Vec<db::FlaggedMessage>, String> {
         .value
         .into_iter()
         .map(|m| {
-            let sender = m
+            let (name, addr) = m
                 .from
-                .map(|f| f.email_address.name.filter(|n| !n.is_empty()).or(f.email_address.address).unwrap_or_default())
+                .map(|f| (f.email_address.name.unwrap_or_default(), f.email_address.address.unwrap_or_default()))
                 .unwrap_or_default();
             db::FlaggedMessage {
                 remote_id: m.id,
                 subject: m.subject.unwrap_or_default(),
-                sender,
+                sender: if name.is_empty() { addr.clone() } else { name },
+                sender_addr: addr,
+                received_at: m.received_date_time,
+                preview: m.body_preview.unwrap_or_default(),
                 web_link: m.web_link.unwrap_or_default(),
                 due_at: m.flag.and_then(|f| f.due_date_time).and_then(|d| flag_due(&d)),
             }

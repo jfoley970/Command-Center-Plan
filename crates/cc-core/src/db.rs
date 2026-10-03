@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS projects (
     description TEXT NOT NULL DEFAULT '',
     color       TEXT NOT NULL DEFAULT '#4c8dff',
     archived    INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    parent_id   INTEGER REFERENCES projects(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -86,6 +87,9 @@ CREATE TABLE IF NOT EXISTS flag_links (
     subject     TEXT NOT NULL DEFAULT '',
     sender      TEXT NOT NULL DEFAULT '',
     web_link    TEXT NOT NULL DEFAULT '',
+    sender_addr TEXT NOT NULL DEFAULT '',
+    received_at TEXT,
+    preview     TEXT NOT NULL DEFAULT '',
     flagged     INTEGER NOT NULL DEFAULT 1,  -- whether Outlook showed it flagged at the last sync
     created_at  TEXT NOT NULL,
     UNIQUE (account_id, remote_id)
@@ -146,6 +150,14 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 "ALTER TABLE {table} ADD COLUMN email_id INTEGER REFERENCES emails(id) ON DELETE SET NULL"
             ))?;
         }
+    }
+    for (column, def) in [("sender_addr", "TEXT NOT NULL DEFAULT ''"), ("received_at", "TEXT"), ("preview", "TEXT NOT NULL DEFAULT ''")] {
+        if !has_column(conn, "flag_links", column)? {
+            conn.execute_batch(&format!("ALTER TABLE flag_links ADD COLUMN {column} {def}"))?;
+        }
+    }
+    if !has_column(conn, "projects", "parent_id")? {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id) ON DELETE SET NULL")?;
     }
     Ok(())
 }
@@ -247,6 +259,62 @@ pub fn set_todo_done(conn: &Connection, id: i64, done: bool) -> rusqlite::Result
 pub fn set_todo_priority(conn: &Connection, id: i64, priority: i64) -> rusqlite::Result<()> {
     conn.execute("UPDATE todos SET priority = ?1 WHERE id = ?2", params![priority.clamp(1, 3), id])?;
     Ok(())
+}
+
+pub fn set_todo_notes(conn: &Connection, id: i64, notes: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE todos SET notes = ?1 WHERE id = ?2", params![notes, id])?;
+    Ok(())
+}
+
+/// The email a todo came from, for showing in its details.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct TodoEmail {
+    pub subject: String,
+    pub from_name: String,
+    pub from_addr: String,
+    pub received_at: Option<String>,
+    pub preview: String,
+    pub web_link: String,
+}
+
+/// Finds the email behind a todo: one Claude suggested from the inbox, or an
+/// Outlook flag. None for todos that didn't come from email.
+pub fn todo_email(conn: &Connection, todo_id: i64) -> rusqlite::Result<Option<TodoEmail>> {
+    let from_inbox = conn
+        .query_row(
+            "SELECT e.subject, e.from_name, e.from_addr, e.received_at, e.preview, e.web_link
+             FROM todos t JOIN emails e ON e.id = t.email_id WHERE t.id = ?1",
+            [todo_id],
+            |r| {
+                Ok(TodoEmail {
+                    subject: r.get(0)?,
+                    from_name: r.get(1)?,
+                    from_addr: r.get(2)?,
+                    received_at: r.get(3)?,
+                    preview: r.get(4)?,
+                    web_link: r.get(5)?,
+                })
+            },
+        )
+        .optional()?;
+    if from_inbox.is_some() {
+        return Ok(from_inbox);
+    }
+    conn.query_row(
+        "SELECT subject, sender, sender_addr, received_at, preview, web_link FROM flag_links WHERE todo_id = ?1 ORDER BY id DESC LIMIT 1",
+        [todo_id],
+        |r| {
+            Ok(TodoEmail {
+                subject: r.get(0)?,
+                from_name: r.get(1)?,
+                from_addr: r.get(2)?,
+                received_at: r.get(3)?,
+                preview: r.get(4)?,
+                web_link: r.get(5)?,
+            })
+        },
+    )
+    .optional()
 }
 
 pub fn delete_todo(conn: &Connection, id: i64) -> rusqlite::Result<()> {
@@ -434,6 +502,8 @@ pub struct Project {
     pub color: String,
     pub archived: bool,
     pub created_at: String,
+    /// The project this one sits under, if it is a sub-project.
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -446,6 +516,8 @@ pub struct ProjectInput {
     pub color: String,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default)]
+    pub parent_id: Option<i64>,
 }
 
 fn default_color() -> String {
@@ -460,10 +532,30 @@ fn project_from_row(r: &Row) -> rusqlite::Result<Project> {
         color: r.get(3)?,
         archived: r.get::<_, i64>(4)? != 0,
         created_at: r.get(5)?,
+        parent_id: r.get(6)?,
     })
 }
 
-const PROJECT_COLS: &str = "id, name, description, color, archived, created_at";
+const PROJECT_COLS: &str = "id, name, description, color, archived, created_at, parent_id";
+
+/// Rejects a parent that is the project itself or one of its own sub-projects,
+/// which would make the tree loop.
+fn check_parent(conn: &Connection, id: Option<i64>, parent: Option<i64>) -> rusqlite::Result<Option<i64>> {
+    let (Some(id), Some(mut cur)) = (id, parent) else { return Ok(parent) };
+    loop {
+        if cur == id {
+            return Err(rusqlite::Error::ToSqlConversionFailure("A project can't sit under itself or one of its sub-projects.".into()));
+        }
+        match conn
+            .query_row("SELECT parent_id FROM projects WHERE id = ?1", [cur], |r| r.get::<_, Option<i64>>(0))
+            .optional()?
+            .flatten()
+        {
+            Some(next) => cur = next,
+            None => return Ok(parent),
+        }
+    }
+}
 
 pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
     let mut stmt = conn.prepare(&format!(
@@ -474,18 +566,19 @@ pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
 }
 
 pub fn save_project(conn: &Connection, p: ProjectInput) -> rusqlite::Result<Project> {
+    let parent = check_parent(conn, p.id, p.parent_id)?;
     let id = match p.id {
         Some(id) => {
             conn.execute(
-                "UPDATE projects SET name = ?1, description = ?2, color = ?3, archived = ?4 WHERE id = ?5",
-                params![p.name.trim(), p.description, p.color, p.archived as i64, id],
+                "UPDATE projects SET name = ?1, description = ?2, color = ?3, archived = ?4, parent_id = ?5 WHERE id = ?6",
+                params![p.name.trim(), p.description, p.color, p.archived as i64, parent, id],
             )?;
             id
         }
         None => {
             conn.execute(
-                "INSERT INTO projects (name, description, color, archived, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![p.name.trim(), p.description, p.color, p.archived as i64, now()],
+                "INSERT INTO projects (name, description, color, archived, created_at, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![p.name.trim(), p.description, p.color, p.archived as i64, now(), parent],
             )?;
             conn.last_insert_rowid()
         }
@@ -493,8 +586,13 @@ pub fn save_project(conn: &Connection, p: ProjectInput) -> rusqlite::Result<Proj
     conn.query_row(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"), [id], project_from_row)
 }
 
-/// Deletes a project. Its tasks and reminders are kept, unassigned.
+/// Deletes a project. Its tasks and reminders are kept, unassigned, and its
+/// sub-projects move up to the deleted project's parent.
 pub fn delete_project(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE projects SET parent_id = (SELECT parent_id FROM projects WHERE id = ?1) WHERE parent_id = ?1",
+        [id],
+    )?;
     conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
     Ok(())
 }
@@ -804,6 +902,9 @@ pub struct FlaggedMessage {
     pub remote_id: String,
     pub subject: String,
     pub sender: String,
+    pub sender_addr: String,
+    pub received_at: Option<String>,
+    pub preview: String,
     pub web_link: String,
     /// When the flag has a due date, the todo is due at this time.
     pub due_at: Option<String>,
@@ -834,15 +935,16 @@ pub fn sync_flags(conn: &Connection, account_id: i64, flagged: &[FlaggedMessage]
         let new_todo = |conn: &Connection| {
             add_todo(
                 conn,
-                NewTodo { title: title.clone(), notes: format!("Flagged email from {}", m.sender), priority: 2, due_at: m.due_at.clone(), project_id: None },
+                NewTodo { title: title.clone(), notes: String::new(), priority: 2, due_at: m.due_at.clone(), project_id: None },
             )
         };
         match link {
             None => {
                 let t = new_todo(conn)?;
                 conn.execute(
-                    "INSERT INTO flag_links (account_id, remote_id, todo_id, subject, sender, web_link, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![account_id, m.remote_id, t.id, m.subject, m.sender, m.web_link, now()],
+                    "INSERT INTO flag_links (account_id, remote_id, todo_id, subject, sender, web_link, sender_addr, received_at, preview, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![account_id, m.remote_id, t.id, m.subject, m.sender, m.web_link, m.sender_addr, m.received_at, m.preview, now()],
                 )?;
                 result.created += 1;
             }
@@ -860,8 +962,8 @@ pub fn sync_flags(conn: &Connection, account_id: i64, flagged: &[FlaggedMessage]
                     result.reopened += 1;
                 }
                 conn.execute(
-                    "UPDATE flag_links SET subject = ?1, sender = ?2, web_link = ?3 WHERE id = ?4",
-                    params![m.subject, m.sender, m.web_link, link_id],
+                    "UPDATE flag_links SET subject = ?1, sender = ?2, web_link = ?3, sender_addr = ?4, received_at = ?5, preview = ?6 WHERE id = ?7",
+                    params![m.subject, m.sender, m.web_link, m.sender_addr, m.received_at, m.preview, link_id],
                 )?;
             }
         }
@@ -1077,13 +1179,37 @@ mod tests {
     #[test]
     fn project_tasks_survive_project_delete() {
         let c = mem();
-        let p = save_project(&c, ProjectInput { id: None, name: " Website ".into(), description: "".into(), color: default_color(), archived: false }).unwrap();
+        let p = save_project(&c, ProjectInput { id: None, name: " Website ".into(), description: "".into(), color: default_color(), archived: false, parent_id: None }).unwrap();
         assert_eq!(p.name, "Website");
         let t = add_todo(&c, NewTodo { title: "Draft copy".into(), notes: "".into(), priority: 2, due_at: None, project_id: Some(p.id) }).unwrap();
         assert_eq!(t.project_id, Some(p.id));
         delete_project(&c, p.id).unwrap();
         assert!(list_projects(&c).unwrap().is_empty());
         assert_eq!(list_todos(&c).unwrap()[0].project_id, None);
+    }
+
+    #[test]
+    fn sub_projects_nest_without_loops() {
+        let c = mem();
+        let mk = |name: &str, parent: Option<i64>| {
+            save_project(&c, ProjectInput { id: None, name: name.into(), description: "".into(), color: default_color(), archived: false, parent_id: parent }).unwrap()
+        };
+        let top = mk("Homelab", None);
+        let mid = mk("Network", Some(top.id));
+        let leaf = mk("Wi-Fi", Some(mid.id));
+        assert_eq!(leaf.parent_id, Some(mid.id));
+
+        // Moving a project under its own descendant, or itself, is refused.
+        let again = |id: i64, parent: i64| {
+            save_project(&c, ProjectInput { id: Some(id), name: "x".into(), description: "".into(), color: default_color(), archived: false, parent_id: Some(parent) })
+        };
+        assert!(again(top.id, leaf.id).is_err());
+        assert!(again(mid.id, mid.id).is_err());
+
+        // Deleting the middle project moves its children up a level.
+        delete_project(&c, mid.id).unwrap();
+        let leaf = list_projects(&c).unwrap().into_iter().find(|p| p.id == leaf.id).unwrap();
+        assert_eq!(leaf.parent_id, Some(top.id));
     }
 
     fn sample_email(remote_id: &str, received_at: &str) -> NewEmail {
@@ -1143,7 +1269,33 @@ mod tests {
     }
 
     fn flag(id: &str) -> FlaggedMessage {
-        FlaggedMessage { remote_id: id.into(), subject: format!("Re: {id}"), sender: "Pat".into(), web_link: "https://x".into(), due_at: None }
+        FlaggedMessage {
+            remote_id: id.into(),
+            subject: format!("Re: {id}"),
+            sender: "Pat".into(),
+            sender_addr: "pat@example.com".into(),
+            received_at: Some("2026-09-28T14:05:00Z".into()),
+            preview: "Can you look at this?".into(),
+            web_link: "https://x".into(),
+            due_at: None,
+        }
+    }
+
+    #[test]
+    fn flagged_todos_carry_email_details() {
+        let c = mem();
+        let a = upsert_account(&c, "me@example.com", "Me", "client", "tenant").unwrap();
+        sync_flags(&c, a, &[flag("7")]).unwrap();
+        let t = list_todos(&c).unwrap().into_iter().next().unwrap();
+        let e = todo_email(&c, t.id).unwrap().unwrap();
+        assert_eq!((e.subject.as_str(), e.from_name.as_str(), e.from_addr.as_str()), ("Re: 7", "Pat", "pat@example.com"));
+        assert_eq!(e.received_at.as_deref(), Some("2026-09-28T14:05:00Z"));
+        assert_eq!(e.preview, "Can you look at this?");
+
+        let plain = add_todo(&c, NewTodo { title: "Buy cable".into(), notes: "".into(), priority: 2, due_at: None, project_id: None }).unwrap();
+        assert_eq!(todo_email(&c, plain.id).unwrap(), None);
+        set_todo_notes(&c, plain.id, "Cat6, 10 ft").unwrap();
+        assert_eq!(list_todos(&c).unwrap().into_iter().find(|t| t.id == plain.id).unwrap().notes, "Cat6, 10 ft");
     }
 
     #[test]
@@ -1179,11 +1331,13 @@ mod tests {
     #[test]
     fn migrates_existing_database() {
         let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT); CREATE TABLE reminders (id INTEGER PRIMARY KEY, title TEXT);").unwrap();
+        c.execute_batch("CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT); CREATE TABLE reminders (id INTEGER PRIMARY KEY, title TEXT); \
+             CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, description TEXT, color TEXT, archived INTEGER, created_at TEXT);").unwrap();
         c.execute_batch(SCHEMA).unwrap();
         migrate(&c).unwrap();
         assert!(has_column(&c, "todos", "project_id").unwrap());
         assert!(has_column(&c, "reminders", "project_id").unwrap());
+        assert!(has_column(&c, "projects", "parent_id").unwrap());
         migrate(&c).unwrap();
     }
 

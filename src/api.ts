@@ -80,6 +80,15 @@ export type FlagLink = {
   flagged: boolean;
 };
 
+export type TodoEmail = {
+  subject: string;
+  from_name: string;
+  from_addr: string;
+  received_at: string | null;
+  preview: string;
+  web_link: string;
+};
+
 export type Project = {
   id: number;
   name: string;
@@ -87,6 +96,7 @@ export type Project = {
   color: string;
   archived: boolean;
   created_at: string;
+  parent_id: number | null;
 };
 
 export type Agent = {
@@ -120,6 +130,8 @@ export const api = {
     call<Todo>("add_todo", { todo }),
   setTodoDone: (id: number, done: boolean) => call<void>("set_todo_done", { id, done }),
   setTodoPriority: (id: number, priority: number) => call<void>("set_todo_priority", { id, priority }),
+  setTodoNotes: (id: number, notes: string) => call<void>("set_todo_notes", { id, notes }),
+  todoEmail: (id: number) => call<TodoEmail | null>("todo_email", { id }),
   deleteTodo: (id: number) => call<void>("delete_todo", { id }),
 
   listReminders: () => call<Reminder[]>("list_reminders"),
