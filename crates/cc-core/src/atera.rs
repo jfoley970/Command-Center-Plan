@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
+use std::sync::Arc;
+
+use crate::secrets::{Secrets, ATERA_KEY};
+use crate::Core;
 
 const API_URL: &str = "https://app.atera.com/api/v3/alerts";
 /// Atera caps a page at 50 items.
@@ -16,39 +18,6 @@ const PAGE_SIZE: u32 = 50;
 /// Enough for any realistic open-alert backlog while staying far under the rate limit.
 const MAX_PAGES: u32 = 20;
 const POLL_SECS: u64 = 120;
-
-const SERVICE: &str = "com.james.commandcenter";
-const KEY_NAME: &str = "atera-api-key";
-
-// ---------- API key ----------
-
-fn entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, KEY_NAME).map_err(|e| e.to_string())
-}
-
-pub fn get_key() -> Result<Option<String>, String> {
-    if let Ok(k) = std::env::var("ATERA_API_KEY") {
-        if !k.trim().is_empty() {
-            return Ok(Some(k));
-        }
-    }
-    match entry()?.get_password() {
-        Ok(k) => Ok(Some(k)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("Could not read the keychain: {e}")),
-    }
-}
-
-pub fn set_key(key: &str) -> Result<(), String> {
-    let key = key.trim();
-    if key.is_empty() {
-        return match entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-    }
-    entry()?.set_password(key).map_err(|e| format!("Could not save to the keychain: {e}"))
-}
 
 // ---------- API types ----------
 
@@ -218,8 +187,8 @@ impl AteraState {
         }
     }
 
-    pub fn snapshot(&self) -> Result<Snapshot, String> {
-        let has_key = get_key()?.is_some();
+    pub fn snapshot(&self, secrets: &Secrets) -> Result<Snapshot, String> {
+        let has_key = secrets.get(ATERA_KEY)?.is_some();
         let i = self.inner.lock().unwrap();
         let is_hidden = |a: &Alert| a.customer_id.is_some_and(|id| i.hidden.iter().any(|h| h.id == id));
         let alerts: Vec<Alert> = i.all.iter().filter(|a| !is_hidden(a)).cloned().collect();
@@ -253,12 +222,12 @@ impl AteraState {
 }
 
 /// Fetches alerts now, stores them, notifies about new critical ones and tells the UI.
-pub async fn refresh(app: &AppHandle) -> Result<Snapshot, String> {
-    let state = app.state::<AteraState>();
-    let Some(key) = get_key()? else {
+pub async fn refresh(core: &Core) -> Result<Snapshot, String> {
+    let state = &core.atera;
+    let Some(key) = core.secrets.get(ATERA_KEY)? else {
         state.clear();
-        let _ = app.emit("atera-changed", ());
-        return state.snapshot();
+        core.changed("atera-changed");
+        return state.snapshot(&core.secrets);
     };
     let result = fetch_alerts(&key).await;
     let fresh: Vec<Alert> = {
@@ -293,29 +262,22 @@ pub async fn refresh(app: &AppHandle) -> Result<Snapshot, String> {
     for a in fresh.iter().take(3) {
         let where_ = [a.customer.as_str(), a.device.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
         let body = if where_.is_empty() { a.title.clone() } else { format!("{}\n{}", a.title, where_) };
-        let _ = app.notification().builder().title("Atera critical alert").body(body).show();
+        core.notify("Atera critical alert", body);
     }
     if fresh.len() > 3 {
-        let _ = app
-            .notification()
-            .builder()
-            .title("Atera critical alerts")
-            .body(format!("{} more new critical alerts", fresh.len() - 3))
-            .show();
+        core.notify("Atera critical alerts", format!("{} more new critical alerts", fresh.len() - 3));
     }
-    let _ = app.emit("atera-changed", ());
-    state.snapshot()
+    core.changed("atera-changed");
+    state.snapshot(&core.secrets)
 }
 
-pub fn start_loop(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            if let Err(e) = refresh(&app).await {
-                eprintln!("atera poll failed: {e}");
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(POLL_SECS)).await;
+pub async fn poll_loop(core: Arc<Core>) {
+    loop {
+        if let Err(e) = refresh(&core).await {
+            eprintln!("atera poll failed: {e}");
         }
-    });
+        tokio::time::sleep(std::time::Duration::from_secs(POLL_SECS)).await;
+    }
 }
 
 #[cfg(test)]

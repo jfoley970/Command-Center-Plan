@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { keyStore, listen } from "../transport";
 import { api, errorText } from "../api";
 import { ago, atera, type AteraAlert, type AteraSnapshot, type Severity } from "../atera";
 import { useData } from "../data";
@@ -148,8 +148,8 @@ export default function AteraAlerts() {
             )}
           </form>
           <p className="muted small">
-            In Atera go to Admin, Data management, API and create a token with read access to alerts. It is stored in the
-            system keychain. Alerts refresh every 2 minutes and new critical ones pop a notification.
+            In Atera go to Admin, Data management, API and create a token with read access to alerts. It is stored in
+            {keyStore}. Alerts refresh every 2 minutes and new critical ones pop a notification.
           </p>
           {snap && snap.hidden_customers.length > 0 && (
             <div className="stack-tight">

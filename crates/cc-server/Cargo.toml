@@ -1,0 +1,17 @@
+[package]
+name = "cc-server"
+version = "0.1.0"
+description = "Command Center server: the shared backend over HTTP and WebSocket, plus the web UI"
+authors = ["James"]
+edition = "2021"
+
+[dependencies]
+cc-core = { path = "../cc-core" }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+serde_json = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

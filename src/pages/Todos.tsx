@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl } from "../transport";
 import { api } from "../api";
 import { useData } from "../data";
 import { formatWhen, fromLocalInput, isOverdue } from "../time";

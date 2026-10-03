@@ -1,5 +1,5 @@
-// Typed wrappers around the Atera commands in src-tauri/src/lib.rs.
-import { invoke } from "@tauri-apps/api/core";
+// Typed wrappers around the Atera commands in crates/cc-core/src/commands.rs.
+import { call } from "./transport";
 
 export type Severity = "critical" | "warning" | "information";
 
@@ -29,11 +29,11 @@ export type AteraSnapshot = {
 };
 
 export const atera = {
-  alerts: () => invoke<AteraSnapshot>("atera_alerts"),
-  refresh: () => invoke<AteraSnapshot>("atera_refresh"),
-  setKey: (key: string) => invoke<AteraSnapshot>("atera_set_key", { key }),
+  alerts: () => call<AteraSnapshot>("atera_alerts"),
+  refresh: () => call<AteraSnapshot>("atera_refresh"),
+  setKey: (key: string) => call<AteraSnapshot>("atera_set_key", { key }),
   setCustomerHidden: (customer: HiddenCustomer, hidden: boolean) =>
-    invoke<void>("atera_set_customer_hidden", { customer, hidden }),
+    call<void>("atera_set_customer_hidden", { customer, hidden }),
 };
 
 /** "just now", "5m ago", "3h ago", "2d ago". */

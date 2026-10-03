@@ -1,5 +1,5 @@
-// Typed wrappers around the UniFi commands in src-tauri/src/lib.rs.
-import { invoke } from "@tauri-apps/api/core";
+// Typed wrappers around the UniFi commands in crates/cc-core/src/commands.rs.
+import { call } from "./transport";
 
 export type Health = "ok" | "warning" | "down";
 
@@ -43,8 +43,8 @@ export type UnifiSnapshot = {
 };
 
 export const unifi = {
-  fleet: () => invoke<UnifiSnapshot>("unifi_fleet"),
-  refresh: () => invoke<UnifiSnapshot>("unifi_refresh"),
-  setKey: (key: string) => invoke<UnifiSnapshot>("unifi_set_key", { key }),
-  setSiteHidden: (site: HiddenSite, hidden: boolean) => invoke<void>("unifi_set_site_hidden", { site, hidden }),
+  fleet: () => call<UnifiSnapshot>("unifi_fleet"),
+  refresh: () => call<UnifiSnapshot>("unifi_refresh"),
+  setKey: (key: string) => call<UnifiSnapshot>("unifi_set_key", { key }),
+  setSiteHidden: (site: HiddenSite, hidden: boolean) => call<void>("unifi_set_site_hidden", { site, hidden }),
 };

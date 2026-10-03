@@ -349,3 +349,10 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 .conn-name { font-weight: 600; }
 .conn-chevron { color: var(--muted); width: 1rem; text-align: center; }
 .conn-panel { padding: 0.2rem 0.8rem 0.8rem 2.1rem; display: flex; flex-direction: column; gap: 0.5rem; }
+
+.device-code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 1.6rem;
+  letter-spacing: 0.15em;
+  margin: 0;
+}

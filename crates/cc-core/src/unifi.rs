@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
+use std::sync::Arc;
+
+use crate::secrets::{Secrets, UNIFI_KEY};
+use crate::Core;
 
 const API_BASE: &str = "https://api.ui.com/v1";
 const PAGE_SIZE: &str = "200";
@@ -17,39 +19,6 @@ const PAGE_SIZE: &str = "200";
 const POLL_SECS: u64 = 300;
 /// Below this WAN uptime (percent over the API's window) a site is flagged.
 const WAN_WARN_PCT: f64 = 99.0;
-
-const SERVICE: &str = "com.james.commandcenter";
-const KEY_NAME: &str = "unifi-site-manager-api-key";
-
-// ---------- API key ----------
-
-fn entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, KEY_NAME).map_err(|e| e.to_string())
-}
-
-pub fn get_key() -> Result<Option<String>, String> {
-    if let Ok(k) = std::env::var("UNIFI_API_KEY") {
-        if !k.trim().is_empty() {
-            return Ok(Some(k));
-        }
-    }
-    match entry()?.get_password() {
-        Ok(k) => Ok(Some(k)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("Could not read the keychain: {e}")),
-    }
-}
-
-pub fn set_key(key: &str) -> Result<(), String> {
-    let key = key.trim();
-    if key.is_empty() {
-        return match entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
-    }
-    entry()?.set_password(key).map_err(|e| format!("Could not save to the keychain: {e}"))
-}
 
 // ---------- API types ----------
 // Everything is optional so a missing or renamed field degrades one number
@@ -424,8 +393,8 @@ impl UnifiState {
         }
     }
 
-    pub fn snapshot(&self) -> Result<Snapshot, String> {
-        let has_key = get_key()?.is_some();
+    pub fn snapshot(&self, secrets: &Secrets) -> Result<Snapshot, String> {
+        let has_key = secrets.get(UNIFI_KEY)?.is_some();
         let i = self.inner.lock().unwrap();
         Ok(Snapshot {
             has_key,
@@ -508,12 +477,12 @@ fn new_problems(seen: &Option<HashMap<String, HashSet<String>>>, sites: &[&Site]
 }
 
 /// Fetches the fleet now, stores it, notifies about new outages and tells the UI.
-pub async fn refresh(app: &AppHandle) -> Result<Snapshot, String> {
-    let state = app.state::<UnifiState>();
-    let Some(key) = get_key()? else {
+pub async fn refresh(core: &Core) -> Result<Snapshot, String> {
+    let state = &core.unifi;
+    let Some(key) = core.secrets.get(UNIFI_KEY)? else {
         state.clear();
-        let _ = app.emit("unifi-changed", ());
-        return state.snapshot();
+        core.changed("unifi-changed");
+        return state.snapshot(&core.secrets);
     };
     let result = fetch_fleet(&key).await;
     let fresh = {
@@ -536,29 +505,22 @@ pub async fn refresh(app: &AppHandle) -> Result<Snapshot, String> {
         }
     };
     for (site, text) in fresh.iter().take(3) {
-        let _ = app.notification().builder().title(format!("UniFi: {site}")).body(text).show();
+        core.notify(format!("UniFi: {site}"), text.clone());
     }
     if fresh.len() > 3 {
-        let _ = app
-            .notification()
-            .builder()
-            .title("UniFi")
-            .body(format!("{} more sites have new problems", fresh.len() - 3))
-            .show();
+        core.notify("UniFi", format!("{} more sites have new problems", fresh.len() - 3));
     }
-    let _ = app.emit("unifi-changed", ());
-    state.snapshot()
+    core.changed("unifi-changed");
+    state.snapshot(&core.secrets)
 }
 
-pub fn start_loop(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            if let Err(e) = refresh(&app).await {
-                eprintln!("unifi poll failed: {e}");
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(POLL_SECS)).await;
+pub async fn poll_loop(core: Arc<Core>) {
+    loop {
+        if let Err(e) = refresh(&core).await {
+            eprintln!("unifi poll failed: {e}");
         }
-    });
+        tokio::time::sleep(std::time::Duration::from_secs(POLL_SECS)).await;
+    }
 }
 
 #[cfg(test)]

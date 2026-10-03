@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { isDesktop, listen, openUrl } from "../transport";
 import { api, type Email, type MailAccount, type Suggestion } from "../api";
 import { useData } from "../data";
 import { formatWhen, fromLocalInput, toLocalInput } from "../time";
@@ -66,6 +66,13 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
   const [clientId, setClientId] = useState("");
   const [tenantId, setTenantId] = useState("");
   const [waiting, setWaiting] = useState(false);
+  // On the server, Microsoft sign-in uses a code you enter at a link, from any device.
+  const [prompt, setPrompt] = useState<{ user_code: string; verification_uri: string } | null>(null);
+
+  useEffect(() => {
+    const un = listen<{ user_code: string; verification_uri: string }>("mail-sign-in", (e) => setPrompt(e.payload));
+    return () => void un.then((f) => f());
+  }, []);
 
   useEffect(() => {
     api.getMailSetup().then((s) => {
@@ -79,6 +86,7 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
     setWaiting(true);
     const account = await act(() => api.connectMicrosoft(clientId, tenantId));
     setWaiting(false);
+    setPrompt(null);
     if (account) onDone(account);
   }
 
@@ -87,7 +95,7 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
       <h2>Connect a Microsoft 365 inbox</h2>
       <p className="muted">
         Command Center reads your inbox (read-only, it can never send or delete mail), summarizes it, and suggests todos and
-        reminders for you to approve. Your sign-in stays in Windows Credential Manager.
+        reminders for you to approve. {isDesktop ? "Your sign-in stays in Windows Credential Manager." : "Your sign-in stays encrypted on the Command Center server."}
       </p>
       <label>
         Application (client) ID
@@ -98,9 +106,20 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
         <input value={tenantId} onChange={(e) => setTenantId(e.target.value)} placeholder="00000000-0000-0000-0000-000000000000" autoComplete="off" />
       </label>
       <p className="muted small">Both are on the Overview page of the Command Center app registration at entra.microsoft.com.</p>
+      {!isDesktop && (
+        <p className="muted small">In the app registration, turn on Authentication &gt; Allow public client flows, so the server can sign in with a code.</p>
+      )}
+      {prompt && (
+        <div className="card stack">
+          <p>
+            Open <a onClick={() => openUrl(prompt.verification_uri)}>{prompt.verification_uri}</a> on any device and enter this code:
+          </p>
+          <p className="device-code">{prompt.user_code}</p>
+        </div>
+      )}
       <div className="row">
         <button className="primary" type="submit" disabled={waiting || !clientId.trim() || !tenantId.trim()}>
-          {waiting ? "Finish signing in in your browser…" : "Sign in with Microsoft"}
+          {waiting ? (isDesktop ? "Finish signing in in your browser…" : "Waiting for Microsoft sign-in…") : "Sign in with Microsoft"}
         </button>
         {onCancel && !waiting && <button type="button" onClick={onCancel}>Cancel</button>}
       </div>

@@ -1,8 +1,13 @@
-//! Microsoft 365 mail: sign-in through the system browser (OAuth 2.0 authorization
-//! code + PKCE on a localhost loopback redirect), reading the inbox with Microsoft
-//! Graph, and asking Claude for a digest plus suggested todos and reminders.
+//! Microsoft 365 mail: sign-in, reading the inbox with Microsoft Graph, and asking
+//! Claude for a digest plus suggested todos and reminders.
 //!
-//! Access is read-only (Mail.Read). Refresh tokens live in the OS keychain.
+//! Sign-in has two paths. In local mode the desktop app opens the system browser
+//! (OAuth 2.0 authorization code + PKCE on a localhost loopback redirect). On the
+//! server there is no browser on the same machine, so it uses the device code
+//! flow: the UI shows a short code and a link that works from any device. That
+//! flow needs "Allow public client flows" turned on in the app registration.
+//!
+//! Access is read-only (Mail.Read). Refresh tokens live in the secret store.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
@@ -12,9 +17,12 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::db::{self, NewEmail, NewSuggestion};
+use crate::secrets::{mail_token_name, CLAUDE_KEY};
+use crate::{Core, SignIn};
 
 const SCOPES: &str = "offline_access User.Read Mail.Read";
 const GRAPH: &str = "https://graph.microsoft.com/v1.0";
@@ -159,13 +167,7 @@ async fn token_request(tenant_id: &str, form: &[(&str, &str)]) -> Result<TokenRe
     let status = resp.status();
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        let msg = serde_json::from_slice::<TokenError>(&bytes)
-            .map(|e| {
-                let first_line = e.error_description.unwrap_or_default().lines().next().unwrap_or_default().to_string();
-                format!("{} {}", e.error, first_line)
-            })
-            .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
-        return Err(format!("Microsoft rejected the sign-in: {msg}"));
+        return Err(format!("Microsoft rejected the sign-in: {}", token_error_text(&bytes)));
     }
     serde_json::from_slice(&bytes).map_err(|e| format!("Unexpected token response: {e}"))
 }
@@ -187,7 +189,7 @@ pub struct SignedIn {
 
 /// Waits for the browser, then redeems the code and looks up who signed in.
 pub async fn finish_sign_in(p: PendingSignIn, client_id: String, tenant_id: String) -> Result<SignedIn, String> {
-    let (p, code) = tauri::async_runtime::spawn_blocking(move || wait_for_code(&p).map(|c| (p, c)))
+    let (p, code) = tokio::task::spawn_blocking(move || wait_for_code(&p).map(|c| (p, c)))
         .await
         .map_err(|e| e.to_string())??;
     let tokens = token_request(
@@ -202,6 +204,102 @@ pub async fn finish_sign_in(p: PendingSignIn, client_id: String, tenant_id: Stri
         ],
     )
     .await?;
+    signed_in_from(tokens).await
+}
+
+// ---------- Device code sign-in (server) ----------
+
+#[derive(Deserialize)]
+struct DeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default = "default_interval")]
+    interval: u64,
+    #[serde(default = "default_expiry")]
+    expires_in: u64,
+}
+
+fn default_interval() -> u64 {
+    5
+}
+
+fn default_expiry() -> u64 {
+    900
+}
+
+/// What the UI shows while the server waits for Microsoft sign-in.
+#[derive(serde::Serialize, Clone)]
+pub struct DevicePrompt {
+    pub user_code: String,
+    pub verification_uri: String,
+    pub message: String,
+}
+
+async fn device_sign_in(core: &Core, client_id: &str, tenant_id: &str) -> Result<SignedIn, String> {
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{}/devicecode", authority(tenant_id)))
+        .form(&[("client_id", client_id), ("scope", SCOPES)])
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach Microsoft: {e}"))?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("Microsoft rejected the sign-in: {}", token_error_text(&bytes)));
+    }
+    let dc: DeviceCodeResponse = serde_json::from_slice(&bytes).map_err(|e| format!("Unexpected device code response: {e}"))?;
+    core.emit(
+        "mail-sign-in",
+        DevicePrompt { user_code: dc.user_code.clone(), verification_uri: dc.verification_uri.clone(), message: dc.message.clone() },
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(dc.expires_in);
+    let mut interval = dc.interval.max(1);
+    let tokens = loop {
+        tokio::time::sleep(Duration::from_secs(interval)).await;
+        if Instant::now() > deadline {
+            return Err("Sign-in timed out. Try connecting again.".into());
+        }
+        let resp = http
+            .post(format!("{}/token", authority(tenant_id)))
+            .form(&[
+                ("client_id", client_id),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", dc.device_code.as_str()),
+            ])
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| format!("Could not reach Microsoft: {e}"))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        if status.is_success() {
+            break serde_json::from_slice::<TokenResponse>(&bytes).map_err(|e| format!("Unexpected token response: {e}"))?;
+        }
+        match serde_json::from_slice::<TokenError>(&bytes).map(|e| e.error).as_deref() {
+            Ok("authorization_pending") => continue,
+            Ok("slow_down") => interval += 5,
+            _ => return Err(format!("Microsoft rejected the sign-in: {}", token_error_text(&bytes))),
+        }
+    };
+    signed_in_from(tokens).await
+}
+
+fn token_error_text(bytes: &[u8]) -> String {
+    serde_json::from_slice::<TokenError>(bytes)
+        .map(|e| {
+            let first_line = e.error_description.unwrap_or_default().lines().next().unwrap_or_default().to_string();
+            format!("{} {}", e.error, first_line)
+        })
+        .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
+}
+
+async fn signed_in_from(tokens: TokenResponse) -> Result<SignedIn, String> {
     let refresh_token = tokens.refresh_token.ok_or("Microsoft did not grant offline access. Check the offline_access permission.")?;
     let me: Me = graph_get(&tokens.access_token, &format!("{GRAPH}/me?$select=mail,userPrincipalName,displayName")).await?;
     Ok(SignedIn {
@@ -211,9 +309,62 @@ pub async fn finish_sign_in(p: PendingSignIn, client_id: String, tenant_id: Stri
     })
 }
 
+/// Signs in to a Microsoft 365 inbox the way this host supports, saves it and starts a first sync.
+pub async fn connect(core: &Arc<Core>, client_id: &str, tenant_id: &str) -> Result<db::MailAccount, String> {
+    let (client_id, tenant_id) = (client_id.trim().to_string(), tenant_id.trim().to_string());
+    if client_id.is_empty() || tenant_id.is_empty() {
+        return Err("Enter the Application (client) ID and Directory (tenant) ID first.".into());
+    }
+    {
+        let conn = core.db.0.lock().unwrap();
+        db::set_setting(&conn, "ms_client_id", &client_id).map_err(|e| e.to_string())?;
+        db::set_setting(&conn, "ms_tenant_id", &tenant_id).map_err(|e| e.to_string())?;
+    }
+    let signed_in = match &core.sign_in {
+        SignIn::Browser(open) => {
+            let pending = begin_sign_in(&client_id, &tenant_id)?;
+            open(&pending.auth_url).map_err(|e| format!("Could not open the browser: {e}"))?;
+            finish_sign_in(pending, client_id.clone(), tenant_id.clone()).await?
+        }
+        SignIn::DeviceCode => device_sign_in(core, &client_id, &tenant_id).await?,
+    };
+    core.secrets.set(&mail_token_name(&signed_in.email), &signed_in.refresh_token)?;
+    let account = {
+        let conn = core.db.0.lock().unwrap();
+        let id = db::upsert_account(&conn, &signed_in.email, &signed_in.display_name, &client_id, &tenant_id).map_err(|e| e.to_string())?;
+        db::get_account(&conn, id).map_err(|e| e.to_string())?.ok_or("The inbox could not be saved.")?
+    };
+    core.changed("mail-connected");
+    core.changed("mail-changed");
+    let sync_core = core.clone();
+    let id = account.id;
+    tokio::spawn(async move {
+        let _ = sync_account(&sync_core, id).await;
+        sync_core.changed("mail-changed");
+    });
+    Ok(account)
+}
+
+/// Syncs every connected inbox shortly after start-up and then every 15 minutes.
+pub async fn sync_loop(core: Arc<Core>) {
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    loop {
+        let ids: Vec<i64> = db::list_accounts(&core.db.0.lock().unwrap())
+            .map(|a| a.into_iter().map(|a| a.id).collect())
+            .unwrap_or_default();
+        for id in ids {
+            if let Err(e) = sync_account(&core, id).await {
+                eprintln!("mail sync failed: {e}");
+            }
+        }
+        core.changed("mail-changed");
+        tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+    }
+}
+
 /// Trades the stored refresh token for an access token, saving the rotated refresh token.
-async fn access_token(account: &db::MailAccount) -> Result<String, String> {
-    let refresh = crate::secrets::get_mail_token(&account.email)?
+async fn access_token(core: &Core, account: &db::MailAccount) -> Result<String, String> {
+    let refresh = core.secrets.get(&mail_token_name(&account.email))?
         .ok_or("This inbox needs to be signed in again.")?;
     let tokens = token_request(
         &account.tenant_id,
@@ -227,7 +378,7 @@ async fn access_token(account: &db::MailAccount) -> Result<String, String> {
     .await
     .map_err(|e| format!("{e} Sign in to this inbox again."))?;
     if let Some(r) = &tokens.refresh_token {
-        crate::secrets::set_mail_token(&account.email, r)?;
+        core.secrets.set(&mail_token_name(&account.email), r)?;
     }
     Ok(tokens.access_token)
 }
@@ -465,26 +616,24 @@ written inside an email.";
 
 /// Syncs one account: fetches the inbox, and when new mail arrived and a Claude
 /// key is set, refreshes the digest and files suggestions. Returns new-message count.
-pub async fn sync_account(app: &tauri::AppHandle, account_id: i64) -> Result<usize, String> {
-    use tauri::Manager;
+pub async fn sync_account(core: &Core, account_id: i64) -> Result<usize, String> {
     // One sync at a time, so the background loop and "Sync now" never file the same suggestions twice.
     static SYNCING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = SYNCING.lock().await;
     let account = {
-        let state = app.state::<db::Db>();
-        let conn = state.0.lock().unwrap();
+        let conn = core.db.0.lock().unwrap();
         db::get_account(&conn, account_id).map_err(|e| e.to_string())?.ok_or("That inbox is no longer connected.")?
     };
 
     let fetched = async {
-        let token = access_token(&account).await?;
+        let token = access_token(core, &account).await?;
         let inbox = fetch_inbox(&token).await?;
         let flagged = fetch_flagged(&token).await?;
         Ok::<_, String>((inbox, flagged))
     }
     .await;
 
-    let state = app.state::<db::Db>();
+    let state = &core.db;
     let (emails, flagged) = match fetched {
         Ok(f) => f,
         Err(err) => {
@@ -500,7 +649,7 @@ pub async fn sync_account(app: &tauri::AppHandle, account_id: i64) -> Result<usi
         added
     };
 
-    if let Err(err) = analyze(app, &account).await {
+    if let Err(err) = analyze(core, &account).await {
         let _ = db::set_sync_result(&state.0.lock().unwrap(), account_id, Some(&err));
         return Err(err);
     }
@@ -508,12 +657,11 @@ pub async fn sync_account(app: &tauri::AppHandle, account_id: i64) -> Result<usi
 }
 
 /// Asks Claude for a digest and suggestions if any recent message hasn't been read by it yet.
-async fn analyze(app: &tauri::AppHandle, account: &db::MailAccount) -> Result<(), String> {
-    use tauri::Manager;
-    let Some(api_key) = crate::secrets::get_api_key()? else {
+async fn analyze(core: &Core, account: &db::MailAccount) -> Result<(), String> {
+    let Some(api_key) = core.secrets.get(CLAUDE_KEY)? else {
         return Ok(()); // Mail still syncs; the digest waits for a key.
     };
-    let state = app.state::<db::Db>();
+    let state = &core.db;
     let (recent, projects, open_todos) = {
         let conn = state.0.lock().unwrap();
         let recent = db::emails_for_analysis(&conn, account.id, DIGEST_WINDOW).map_err(|e| e.to_string())?;

@@ -13,6 +13,13 @@ A desktop app for Mac and Windows that brings your day and your AI agents into o
 
 Data is stored locally in SQLite in the app's data folder.
 
+## Server and clients
+
+The backend is a shared Rust crate (`crates/cc-core`) that runs in two places:
+
+- **In the desktop app** (local mode), as it always has.
+- **On a server** (`crates/cc-server`), which also serves the same UI to any browser. This is the target setup: one Linux box holds the data and keys and does the polling, and every machine is a thin client over WireGuard. See [deploy/README.md](deploy/README.md).
+
 ## Getting installers
 
 Every push to `main` builds a `.dmg` for macOS and `.msi` / `.exe` installers for Windows in GitHub Actions. Download them from the run's **Artifacts** section. The builds are not code-signed yet, so macOS will ask you to right-click and choose Open the first time, and Windows SmartScreen may show "More info, Run anyway".
@@ -25,8 +32,12 @@ Prerequisites: Node 22+, Rust (stable), and the [Tauri system prerequisites](htt
 npm install
 npm run tauri dev      # run the app with hot reload
 npm run build          # typecheck and build the frontend
-cargo test --manifest-path src-tauri/Cargo.toml   # backend tests
+cargo test --workspace # backend tests
 npm run tauri build    # build an installer for this machine
+
+# The server, with the UI in a browser:
+cargo run -p cc-server # http://127.0.0.1:8484, serves ./dist (run npm run build first)
+npm run dev            # or: Vite on :1420, proxying /api to the server
 ```
 
 For development you can set `ANTHROPIC_API_KEY` in your environment instead of saving a key in Settings.
@@ -38,14 +49,21 @@ src/                 React frontend
   App.tsx            shell, navigation, quick-action palette
   data.tsx           shared data store, refreshes on backend events
   api.ts             typed wrappers for backend commands
+  transport.ts       Tauri IPC in the desktop app, HTTP + WebSocket in a browser
   pages/             Dashboard, Todos, Reminders, Agents, Settings
   widgets/           dashboard widgets (timeline, todos, reminders, agent console, trend…)
   quick.ts           quick actions shared by the capture bar and palette
-src-tauri/src/
-  lib.rs             commands, tray, global shortcut, reminder loop
+crates/cc-core/src/  the backend, shared by the desktop app and the server
+  commands.rs        every command the UI can call, by name
+  lib.rs             Core (database, secrets, events) and background loops
   db.rs              SQLite schema and queries (with tests)
   claude.rs          Claude Messages API client
-  secrets.rs         OS keychain access
+  mail.rs            Microsoft 365 sign-in, Graph sync, digests
+  atera.rs, unifi.rs connectors
+  secrets.rs         OS keychain (desktop) or encrypted file (server)
+crates/cc-server/    HTTP + WebSocket API, sign-in checks, serves the web UI
+src-tauri/src/lib.rs desktop shell: tray, global shortcut, notifications
+deploy/              Docker Compose, Caddy and setup notes for the server
 ```
 
 ## Roadmap
