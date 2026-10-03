@@ -409,6 +409,51 @@ pub fn snooze_reminder(conn: &Connection, id: i64, minutes: i64) -> rusqlite::Re
     Ok(())
 }
 
+/// Moves a reminder to a new time. A reminder that already went off is armed again.
+/// For a repeating reminder this moves the whole series to the new time.
+pub fn reschedule_reminder(conn: &Connection, id: i64, remind_at: &str) -> Result<Reminder, String> {
+    let at = chrono::DateTime::parse_from_rfc3339(remind_at)
+        .map_err(|e| format!("Invalid reminder time: {e}"))?
+        .with_timezone(&chrono::Utc);
+    if at < chrono::Utc::now() - chrono::Duration::minutes(1) {
+        return Err("Pick a time in the future.".into());
+    }
+    let n = conn
+        .execute(
+            "UPDATE reminders SET remind_at = ?1, fired = 0 WHERE id = ?2",
+            params![at.to_rfc3339(), id],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("That reminder no longer exists.".into());
+    }
+    conn.query_row(
+        &format!("SELECT {REMINDER_COLS} FROM reminders WHERE id = ?1"),
+        [id],
+        reminder_from_row,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Brings a reminder that just went off back in `minutes`. A one-off reminder is
+/// moved; a repeating one keeps its schedule and gets a one-off follow-up instead.
+pub fn extend_reminder(conn: &Connection, id: i64, minutes: i64) -> Result<Reminder, String> {
+    let r = conn
+        .query_row(
+            &format!("SELECT {REMINDER_COLS} FROM reminders WHERE id = ?1"),
+            [id],
+            reminder_from_row,
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("That reminder no longer exists.")?;
+    let at = (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339();
+    if r.repeat == "none" {
+        return reschedule_reminder(conn, id, &at);
+    }
+    add_reminder(conn, NewReminder { title: r.title, remind_at: at, repeat: "none".into(), project_id: r.project_id })
+}
+
 /// Returns reminders that are due and not yet fired, and advances or marks them.
 pub fn take_due_reminders(conn: &Connection) -> rusqlite::Result<Vec<Reminder>> {
     let now = chrono::Utc::now();
@@ -1329,6 +1374,42 @@ mod tests {
         let next = chrono::DateTime::parse_from_rfc3339(&r.remind_at).unwrap();
         assert!(next > chrono::Utc::now());
         assert_eq!(take_due_reminders(&c).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn reschedule_rearms_a_fired_reminder() {
+        let c = mem();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let r = add_reminder(&c, NewReminder { title: "x".into(), remind_at: past, repeat: "none".into(), project_id: None }).unwrap();
+        take_due_reminders(&c).unwrap();
+        let later = chrono::Utc::now() + chrono::Duration::hours(2);
+        let moved = reschedule_reminder(&c, r.id, &later.to_rfc3339()).unwrap();
+        assert!(!moved.fired);
+        assert_eq!(chrono::DateTime::parse_from_rfc3339(&moved.remind_at).unwrap().timestamp(), later.timestamp());
+        let long_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(reschedule_reminder(&c, r.id, &long_ago).is_err());
+        assert!(reschedule_reminder(&c, r.id + 99, &later.to_rfc3339()).is_err());
+    }
+
+    #[test]
+    fn extend_moves_one_offs_and_follows_up_repeats() {
+        let c = mem();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let once = add_reminder(&c, NewReminder { title: "once".into(), remind_at: past.clone(), repeat: "none".into(), project_id: None }).unwrap();
+        let daily = add_reminder(&c, NewReminder { title: "daily".into(), remind_at: past, repeat: "daily".into(), project_id: None }).unwrap();
+        take_due_reminders(&c).unwrap();
+        let daily_next = list_reminders(&c).unwrap().into_iter().find(|r| r.id == daily.id).unwrap().remind_at;
+
+        let e = extend_reminder(&c, once.id, 15).unwrap();
+        assert_eq!(e.id, once.id);
+        assert!(!e.fired);
+
+        let f = extend_reminder(&c, daily.id, 5).unwrap();
+        assert_ne!(f.id, daily.id);
+        assert_eq!((f.title.as_str(), f.repeat.as_str()), ("daily", "none"));
+        let all = list_reminders(&c).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.iter().find(|r| r.id == daily.id).unwrap().remind_at, daily_next);
     }
 
     #[test]

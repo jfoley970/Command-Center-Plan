@@ -404,3 +404,61 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 .email-preview { margin: 0; color: var(--text-2); font-size: 0.82rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
 .todo-notes { width: 100%; resize: vertical; font-size: 0.85rem; min-height: 2.4rem; }
 .todo-detail .small { margin: 0; font-size: 0.72rem; }
+
+/* ---------- Reminders: change time in place, and the popup when one goes off ---------- */
+.tag-btn { cursor: pointer; font: inherit; font-size: 0.75rem; padding: 0.1rem 0.5rem; }
+.tag-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); background: var(--panel-2); }
+.time-edit { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.time-edit input { padding: 0.2rem 0.45rem; font-size: 0.8rem; }
+.time-edit button { font-size: 0.78rem; padding: 0.2rem 0.6rem; }
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 20; background: rgba(0, 0, 0, 0.6);
+  display: flex; align-items: flex-start; justify-content: center; padding: 14vh 16px 16px;
+}
+.modal {
+  width: min(460px, 100%); max-height: 72vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+.modal-head { display: flex; align-items: center; gap: 0.6rem; padding: 0.8rem 0.8rem 0.4rem 1.1rem; }
+.modal-head h2 { margin: 0; }
+.alert-list { list-style: none; margin: 0; padding: 0 1.1rem 0.4rem; }
+.alert-list li { display: flex; flex-direction: column; gap: 0.55rem; padding: 0.7rem 0 0.9rem; }
+.alert-list li + li { border-top: 1px solid var(--border); }
+.alert-title { font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+.chips-label { font-size: 0.78rem; color: var(--muted); align-self: center; margin-right: 2px; }
+.chips button.active { border-color: var(--accent); background: rgba(57, 135, 229, 0.18); }
+.alert-actions { display: flex; justify-content: flex-end; }
+/* While a time is being edited, the picker gets its own line so the title stays readable. */
+.list li:has(> .time-edit) { flex-wrap: wrap; }
+.list li > .time-edit { order: 10; flex-basis: 100%; justify-content: flex-end; }
+.list li:has(> .time-edit) > button.ghost:not(.time-edit button) { display: none; }
+
+/* ---------- Toolbar in the top-right margin ---------- */
+.topbar {
+  position: fixed; top: 5px; right: 14px; z-index: 15;
+  display: flex; align-items: center; height: 22px; padding: 0 3px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+  font-size: 0.72rem; color: var(--muted);
+}
+.topbar-item { display: flex; align-items: center; gap: 5px; height: 100%; padding: 0 0 0 5px; }
+.topbar:empty { display: none; }
+/* A thin divider between tools. */
+.topbar-item + .topbar-item { margin-left: 5px; border-left: 1px solid var(--border); padding-left: 8px; }
+
+/* ---------- Pomodoro timer ---------- */
+.pomo { font-variant-numeric: tabular-nums; }
+.pomo-dot { width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
+.pomo-running.pomo-work .pomo-dot { background: var(--series-2); border-color: var(--series-2); }
+.pomo-running.pomo-break .pomo-dot { background: var(--good); border-color: var(--good); }
+.pomo-paused .pomo-dot { border-color: var(--warning); }
+.pomo-running .pomo-time, .pomo-paused .pomo-time { color: var(--text); }
+.pomo-paused .pomo-time { opacity: 0.7; }
+.pomo-phase { text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.62rem; }
+.pomo-time { font-weight: 600; min-width: 2.6em; text-align: right; }
+.pomo-btn {
+  width: 18px; height: 18px; padding: 0; display: grid; place-items: center; border-radius: 50%;
+  border: none; background: transparent; color: var(--muted); fill: currentColor;
+}
+.pomo-btn:hover:not(:disabled) { color: var(--text); background: var(--raised); border: none; }
+.pomo-actions { gap: 0.4rem; flex-wrap: wrap; }

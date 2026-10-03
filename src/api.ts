@@ -139,6 +139,10 @@ export const api = {
     call<Reminder>("add_reminder", { reminder }),
   deleteReminder: (id: number) => call<void>("delete_reminder", { id }),
   snoozeReminder: (id: number, minutes: number) => call<void>("snooze_reminder", { id, minutes }),
+  /** Moves a reminder to a new time, re-arming it if it already went off. */
+  rescheduleReminder: (id: number, remindAt: string) => call<Reminder>("reschedule_reminder", { id, remindAt }),
+  /** Brings a reminder back in `minutes`; a repeating one gets a one-off follow-up. */
+  extendReminder: (id: number, minutes: number) => call<Reminder>("extend_reminder", { id, minutes }),
 
   listProjects: () => call<Project[]>("list_projects"),
   saveProject: (project: Omit<Project, "id" | "created_at"> & { id?: number }) =>
