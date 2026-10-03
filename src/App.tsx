@@ -11,6 +11,7 @@ import Todos from "./pages/Todos";
 import Reminders from "./pages/Reminders";
 import Agents from "./pages/Agents";
 import Settings from "./pages/Settings";
+import ReminderAlerts from "./ReminderAlerts";
 import "./styles.css";
 
 export type Page = "dashboard" | "inbox" | "projects" | "todos" | "reminders" | "agents" | "settings";
@@ -100,6 +101,8 @@ function Shell() {
         {page === "agents" && <Agents selectedId={agentId} onSelect={setAgentId} />}
         {page === "settings" && <Settings go={setPage} />}
       </main>
+
+      <ReminderAlerts />
 
       <Palette
         open={paletteOpen}

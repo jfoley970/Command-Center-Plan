@@ -81,6 +81,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     const unlisten = Promise.all([
       listen("runs-changed", () => refresh()),
       listen("reminders-fired", () => refresh()),
+      listen("reminders-changed", () => refresh()),
       listen("mail-changed", () => refresh()),
     ]);
     // Keeps relative labels like "overdue" current.

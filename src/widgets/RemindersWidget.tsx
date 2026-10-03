@@ -3,6 +3,7 @@ import { api } from "../api";
 import { useData } from "../data";
 import { minutesFromNow, quick, tomorrowAt9 } from "../quick";
 import { formatWhen } from "../time";
+import ReminderTime from "./ReminderTime";
 import Widget from "./Widget";
 
 const DAY = 86400_000;
@@ -48,7 +49,7 @@ export default function RemindersWidget() {
                 {r.title}
                 <span className="sub">Went off {formatWhen(r.remind_at)}</span>
               </span>
-              <button onClick={() => act(() => api.snoozeReminder(r.id, 15))}>Snooze 15</button>
+              <button onClick={() => act(() => api.extendReminder(r.id, 15))}>Snooze 15</button>
               <button className="ghost row-action" onClick={() => act(() => api.deleteReminder(r.id))} aria-label={`Dismiss ${r.title}`}>
                 ✕
               </button>
@@ -65,7 +66,7 @@ export default function RemindersWidget() {
             <li key={r.id}>
               <span className="grow truncate" title={r.title}>{r.title}</span>
               {r.repeat !== "none" && <span className="tag">{r.repeat}</span>}
-              <span className="tag">{formatWhen(r.remind_at)}</span>
+              <ReminderTime reminder={r} />
               <button className="ghost row-action" onClick={() => act(() => api.deleteReminder(r.id))} aria-label={`Delete ${r.title}`}>
                 ✕
               </button>
