@@ -1,24 +1,16 @@
-import { useState, type FormEvent } from "react";
-import { api } from "../api";
-import { useData } from "../data";
+import { useState } from "react";
+import type { Page } from "../App";
+import { allConnectors, type Connector } from "../connectors";
+import type { ConnectorState } from "../connectors/registry";
 
-export default function Settings() {
-  const { hasKey, act } = useData();
-  const [key, setKey] = useState("");
-  const [saved, setSaved] = useState(false);
+const GROUPS: Connector["group"][] = ["AI", "Email", "Monitoring", "Network", "Infrastructure", "Devices"];
 
-  async function save(e: FormEvent) {
-    e.preventDefault();
-    setSaved(false);
-    const ok = await act(async () => {
-      await api.setApiKey(key);
-      return true;
-    });
-    if (ok) {
-      setKey("");
-      setSaved(true);
-    }
-  }
+const DOT: Record<ConnectorState, string> = { connected: "ok", attention: "error", off: "idle", planned: "idle" };
+const TAG: Record<ConnectorState, string> = { connected: "Connected", attention: "Needs attention", off: "Not set up", planned: "Planned" };
+
+export default function Settings({ go }: { go: (p: Page) => void }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const connectors = allConnectors();
 
   return (
     <div className="page">
@@ -26,30 +18,26 @@ export default function Settings() {
         <h1>Settings</h1>
       </header>
 
-      <form className="card stack" onSubmit={save}>
-        <h2>Claude API key</h2>
-        <p className="muted">
-          Stored in your operating system's keychain, never in a file. Status:{" "}
-          <strong>{hasKey ? "saved" : "not set"}</strong>
-        </p>
-        <div className="form-row">
-          <input
-            className="grow"
-            type="password"
-            placeholder={hasKey ? "Paste a new key to replace it" : "sk-ant-…"}
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            autoComplete="off"
-          />
-          <button className="primary" type="submit" disabled={!key.trim()}>Save</button>
-          {hasKey && (
-            <button type="button" className="ghost" onClick={() => act(() => api.setApiKey(""))}>
-              Remove
-            </button>
-          )}
+      <section className="card stack">
+        <div>
+          <h2>Connections</h2>
+          <p className="muted small">Every API, agent and service the app uses. Keys are stored in your operating system's keychain.</p>
         </div>
-        {saved && <p className="muted">Saved.</p>}
-      </form>
+        {GROUPS.map((g) => {
+          const items = connectors.filter((c) => c.group === g);
+          if (items.length === 0) return null;
+          return (
+            <div key={g} className="conn-group">
+              <h3 className="conn-group-title">{g}</h3>
+              <ul className="conn-list">
+                {items.map((c) => (
+                  <ConnectorRow key={c.id} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)} go={go} />
+                ))}
+              </ul>
+            </div>
+          );
+        })}
+      </section>
 
       <section className="card stack">
         <h2>Shortcuts</h2>
@@ -59,11 +47,30 @@ export default function Settings() {
           <li>Closing the window keeps the app in the tray so reminders still fire. Quit from the tray icon.</li>
         </ul>
       </section>
-
-      <section className="card soon">
-        <h2>Coming next</h2>
-        <p className="muted">Email account, calendar, ESXi host connection and voice settings arrive in milestone 2.</p>
-      </section>
     </div>
+  );
+}
+
+function ConnectorRow({ c, open, onToggle, go }: { c: Connector; open: boolean; onToggle: () => void; go: (p: Page) => void }) {
+  const status = c.useStatus();
+  const Panel = c.Panel;
+  return (
+    <li className={`conn-row ${open ? "open" : ""}`}>
+      <button className="conn-head" onClick={Panel ? onToggle : undefined} disabled={!Panel} aria-expanded={Panel ? open : undefined}>
+        <span className={`status-dot ${DOT[status.state]}`} aria-hidden="true" />
+        <span className="grow conn-text">
+          <span className="conn-name">{c.name}</span>
+          <span className="sub truncate" title={status.detail}>{status.state === "planned" ? c.description : status.detail}</span>
+        </span>
+        <span className={`tag ${status.state === "attention" ? "bad" : ""}`}>{TAG[status.state]}</span>
+        {Panel && <span className="conn-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>}
+      </button>
+      {open && Panel && (
+        <div className="conn-panel">
+          <p className="muted small">{c.description}</p>
+          <Panel go={go} />
+        </div>
+      )}
+    </li>
   );
 }

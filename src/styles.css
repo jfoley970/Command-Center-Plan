@@ -131,6 +131,9 @@ kbd {
 .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .status-dot.warning { background: var(--warning); box-shadow: 0 0 0 3px rgba(250, 178, 25, 0.18); }
 .status-dot.idle { background: transparent; border: 1.5px solid var(--border-strong); }
+.status-dot.ok { background: var(--good); }
+.status-dot.error { background: var(--critical); }
+.list li.clickable { cursor: pointer; }
 .status-icon {
   display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
   background: var(--critical); color: #fff; font-size: 0.72rem; font-weight: 800; margin-right: 6px; vertical-align: 4px;
@@ -290,6 +293,25 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 .agent-list li { cursor: pointer; border-radius: 6px; padding-left: 0.5rem; }
 .agent-list li.active { background: var(--panel-2); font-weight: 600; }
 .run { display: flex; flex-direction: column; gap: 0.4rem; }
+
+/* ---------- Projects page ---------- */
+.dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.dot.lg { width: 14px; height: 14px; }
+.swatch { width: 24px; height: 24px; padding: 0; border-radius: 50%; border: 2px solid transparent; }
+.swatch.active { border-color: var(--text); }
+.progress { height: 6px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.progress span { display: block; height: 100%; border-radius: 999px; transition: width 0.3s; }
+.project-tag { display: inline-flex; align-items: center; gap: 0.35rem; }
+
+/* ---------- Inbox page ---------- */
+.tag.accent { background: rgba(57, 135, 229, 0.18); border-color: rgba(57, 135, 229, 0.45); color: var(--text); }
+.summary { white-space: pre-wrap; line-height: 1.6; }
+.stack.tight { gap: 0.35rem; }
+.nowrap { white-space: nowrap; }
+.list li.email { align-items: flex-start; }
+.email .from { color: var(--text-2); }
+.email.unread .from, .email.unread .subject { color: var(--text); font-weight: 600; }
+.list li.suggestion { align-items: flex-start; padding: 0.7rem 0.2rem; }
 .run-input { font-style: italic; color: var(--muted); }
 
 /* ---------- Quick action palette (cmdk) ---------- */
@@ -313,3 +335,17 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
   .split { flex-direction: column; }
   .agent-list { width: 100%; }
 }
+
+/* Settings > Connections */
+.conn-group { display: flex; flex-direction: column; gap: 0.3rem; }
+.conn-group-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; margin: 0; }
+.conn-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.conn-row { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+.conn-row.open { border-color: var(--border-strong); }
+.conn-head { display: flex; align-items: center; gap: 0.7rem; width: 100%; background: none; border: none; padding: 0.6rem 0.8rem; text-align: left; color: var(--text); }
+.conn-head:hover:not(:disabled) { background: var(--raised); border: none; }
+.conn-head:disabled { opacity: 1; cursor: default; }
+.conn-text { display: flex; flex-direction: column; min-width: 0; }
+.conn-name { font-weight: 600; }
+.conn-chevron { color: var(--muted); width: 1rem; text-align: center; }
+.conn-panel { padding: 0.2rem 0.8rem 0.8rem 2.1rem; display: flex; flex-direction: column; gap: 0.5rem; }

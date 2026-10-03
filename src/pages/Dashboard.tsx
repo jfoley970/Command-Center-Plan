@@ -14,6 +14,7 @@ import AgentConsole from "../widgets/AgentConsole";
 import Trend from "../widgets/Trend";
 import Integrations from "../widgets/Integrations";
 import AteraAlerts from "../widgets/AteraAlerts";
+import UnifiFleet from "../widgets/UnifiFleet";
 
 const LAYOUT_KEY = "cc.dashboard.layout.v2";
 
@@ -26,6 +27,7 @@ const DEFAULT_LAYOUT: Layout = [
   { i: "trend", x: 0, y: 15, w: 4, h: 6, minH: 5, minW: 3 },
   { i: "connections", x: 4, y: 15, w: 8, h: 6, minH: 4, minW: 3 },
   { i: "atera", x: 0, y: 21, w: 12, h: 8, minH: 4, minW: 4 },
+  { i: "unifi", x: 0, y: 29, w: 12, h: 8, minH: 4, minW: 4 },
 ];
 
 // Layout is a per-device convenience, so browser storage is fine; it must never break the page.
@@ -138,7 +140,8 @@ export default function Dashboard({ go }: { go: (p: Page) => void }) {
             </div>
             <div key="trend"><Trend /></div>
             <div key="atera"><AteraAlerts /></div>
-            <div key="connections"><Integrations /></div>
+            <div key="unifi"><UnifiFleet /></div>
+            <div key="connections"><Integrations onOpenInbox={() => go("inbox")} /></div>
           </ReactGridLayout>
         )}
       </div>

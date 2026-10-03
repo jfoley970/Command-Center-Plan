@@ -1,7 +1,9 @@
 mod atera;
 mod claude;
 mod db;
+mod mail;
 mod secrets;
+mod unifi;
 
 use db::Db;
 use serde::Serialize;
@@ -74,6 +76,145 @@ fn snooze_reminder(db: State<Db>, id: i64, minutes: i64) -> CmdResult<()> {
     db::snooze_reminder(&db.0.lock().unwrap(), id, minutes.max(1)).map_err(err)
 }
 
+// ---------- Projects ----------
+
+#[tauri::command]
+fn list_projects(db: State<Db>) -> CmdResult<Vec<db::Project>> {
+    db::list_projects(&db.0.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+fn save_project(db: State<Db>, project: db::ProjectInput) -> CmdResult<db::Project> {
+    if project.name.trim().is_empty() {
+        return Err("A project needs a name.".into());
+    }
+    db::save_project(&db.0.lock().unwrap(), project).map_err(err)
+}
+
+#[tauri::command]
+fn delete_project(db: State<Db>, id: i64) -> CmdResult<()> {
+    db::delete_project(&db.0.lock().unwrap(), id).map_err(err)
+}
+
+// ---------- Mail ----------
+
+#[derive(Serialize)]
+struct MailSetup {
+    client_id: String,
+    tenant_id: String,
+}
+
+#[tauri::command]
+fn get_mail_setup(db: State<Db>) -> CmdResult<MailSetup> {
+    let conn = db.0.lock().unwrap();
+    Ok(MailSetup {
+        client_id: db::get_setting(&conn, "ms_client_id").map_err(err)?.unwrap_or_default(),
+        tenant_id: db::get_setting(&conn, "ms_tenant_id").map_err(err)?.unwrap_or_default(),
+    })
+}
+
+/// Opens Microsoft sign-in in the browser and connects the inbox that signs in.
+#[tauri::command]
+async fn connect_microsoft(app: AppHandle, client_id: String, tenant_id: String) -> CmdResult<db::MailAccount> {
+    use tauri_plugin_opener::OpenerExt;
+    let (client_id, tenant_id) = (client_id.trim().to_string(), tenant_id.trim().to_string());
+    if client_id.is_empty() || tenant_id.is_empty() {
+        return Err("Enter the Application (client) ID and Directory (tenant) ID first.".into());
+    }
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::set_setting(&conn, "ms_client_id", &client_id).map_err(err)?;
+        db::set_setting(&conn, "ms_tenant_id", &tenant_id).map_err(err)?;
+    }
+    let pending = mail::begin_sign_in(&client_id, &tenant_id)?;
+    app.opener().open_url(pending.auth_url.clone(), None::<&str>).map_err(|e| format!("Could not open the browser: {e}"))?;
+    let signed_in = mail::finish_sign_in(pending, client_id.clone(), tenant_id.clone()).await?;
+    secrets::set_mail_token(&signed_in.email, &signed_in.refresh_token)?;
+    let account = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let id = db::upsert_account(&conn, &signed_in.email, &signed_in.display_name, &client_id, &tenant_id).map_err(err)?;
+        db::get_account(&conn, id).map_err(err)?.ok_or("The inbox could not be saved.")?
+    };
+    show_main(&app);
+    let _ = app.emit("mail-changed", ());
+    let sync_app = app.clone();
+    let id = account.id;
+    tauri::async_runtime::spawn(async move {
+        let _ = mail::sync_account(&sync_app, id).await;
+        let _ = sync_app.emit("mail-changed", ());
+    });
+    Ok(account)
+}
+
+#[tauri::command]
+fn list_mail_accounts(db: State<Db>) -> CmdResult<Vec<db::MailAccount>> {
+    db::list_accounts(&db.0.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+fn list_emails(db: State<Db>, account_id: i64) -> CmdResult<Vec<db::Email>> {
+    db::list_emails(&db.0.lock().unwrap(), account_id, 50).map_err(err)
+}
+
+#[tauri::command]
+async fn sync_mail(app: AppHandle, account_id: i64) -> CmdResult<usize> {
+    let result = mail::sync_account(&app, account_id).await;
+    let _ = app.emit("mail-changed", ());
+    result
+}
+
+#[tauri::command]
+fn disconnect_mail(db: State<Db>, account_id: i64) -> CmdResult<()> {
+    let conn = db.0.lock().unwrap();
+    if let Some(a) = db::get_account(&conn, account_id).map_err(err)? {
+        secrets::delete_mail_token(&a.email)?;
+    }
+    db::delete_account(&conn, account_id).map_err(err)
+}
+
+#[tauri::command]
+fn list_flag_links(db: State<Db>) -> CmdResult<Vec<db::FlagLink>> {
+    db::list_flag_links(&db.0.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+fn list_suggestions(db: State<Db>) -> CmdResult<Vec<db::Suggestion>> {
+    db::list_pending_suggestions(&db.0.lock().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+fn accept_suggestion(db: State<Db>, suggestion: db::AcceptSuggestion) -> CmdResult<()> {
+    db::accept_suggestion(&db.0.lock().unwrap(), suggestion)
+}
+
+#[tauri::command]
+fn dismiss_suggestion(db: State<Db>, id: i64) -> CmdResult<()> {
+    db::dismiss_suggestion(&db.0.lock().unwrap(), id).map_err(err)
+}
+
+/// Syncs every connected inbox shortly after launch and then every 15 minutes.
+fn start_mail_loop(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        loop {
+            let ids: Vec<i64> = {
+                let state = app.state::<Db>();
+                let conn = state.0.lock().unwrap();
+                db::list_accounts(&conn).map(|a| a.into_iter().map(|a| a.id).collect()).unwrap_or_default()
+            };
+            for id in ids {
+                if let Err(e) = mail::sync_account(&app, id).await {
+                    eprintln!("mail sync failed: {e}");
+                }
+            }
+            let _ = app.emit("mail-changed", ());
+            tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+        }
+    });
+}
+
 // ---------- Agents ----------
 
 #[derive(Serialize)]
@@ -114,10 +255,16 @@ fn list_runs(db: State<Db>, agent_id: Option<i64>, limit: Option<i64>) -> CmdRes
 fn day_context(conn: &rusqlite::Connection) -> CmdResult<String> {
     let todos = db::list_todos(conn).map_err(err)?;
     let reminders = db::list_reminders(conn).map_err(err)?;
+    let projects = db::list_projects(conn).map_err(err)?;
+    let project_name = |id: Option<i64>| {
+        id.and_then(|id| projects.iter().find(|p| p.id == id))
+            .map(|p| format!(" [project: {}]", p.name))
+            .unwrap_or_default()
+    };
     let mut s = format!("Current time: {}\n\nOpen todos:\n", chrono::Local::now().format("%A %Y-%m-%d %H:%M"));
     for t in todos.iter().filter(|t| !t.done) {
         let due = t.due_at.as_deref().map(|d| format!(" (due {d})")).unwrap_or_default();
-        s.push_str(&format!("- [P{}] {}{}\n", t.priority, t.title, due));
+        s.push_str(&format!("- [P{}] {}{}{}\n", t.priority, t.title, due, project_name(t.project_id)));
     }
     s.push_str("\nUpcoming reminders:\n");
     for r in reminders.iter().filter(|r| !r.fired) {
@@ -196,6 +343,36 @@ fn atera_set_customer_hidden(
     Ok(())
 }
 
+// ---------- UniFi ----------
+
+#[tauri::command]
+fn unifi_fleet(unifi: State<unifi::UnifiState>) -> CmdResult<unifi::Snapshot> {
+    unifi.snapshot()
+}
+
+#[tauri::command]
+async fn unifi_refresh(app: AppHandle) -> CmdResult<unifi::Snapshot> {
+    unifi::refresh(&app).await
+}
+
+#[tauri::command]
+async fn unifi_set_key(app: AppHandle, key: String) -> CmdResult<unifi::Snapshot> {
+    unifi::set_key(&key)?;
+    unifi::refresh(&app).await
+}
+
+#[tauri::command]
+fn unifi_set_site_hidden(
+    app: AppHandle,
+    unifi: State<unifi::UnifiState>,
+    site: unifi::HiddenSite,
+    hidden: bool,
+) -> CmdResult<()> {
+    unifi.set_hidden(site, hidden)?;
+    let _ = app.emit("unifi-changed", ());
+    Ok(())
+}
+
 // ---------- Settings ----------
 
 #[tauri::command]
@@ -271,6 +448,7 @@ pub fn run() {
             db::mark_orphaned_runs(&database.0.lock().unwrap())?;
             app.manage(database);
             app.manage(atera::AteraState::new(&dir));
+            app.manage(unifi::UnifiState::new(&dir));
 
             let show = MenuItem::with_id(app, "show", "Open Command Center", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -294,7 +472,9 @@ pub fn run() {
             }
 
             start_reminder_loop(app.handle().clone());
+            start_mail_loop(app.handle().clone());
             atera::start_loop(app.handle().clone());
+            unifi::start_loop(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -314,6 +494,19 @@ pub fn run() {
             add_reminder,
             delete_reminder,
             snooze_reminder,
+            list_projects,
+            save_project,
+            delete_project,
+            get_mail_setup,
+            connect_microsoft,
+            list_mail_accounts,
+            list_emails,
+            sync_mail,
+            disconnect_mail,
+            list_flag_links,
+            list_suggestions,
+            accept_suggestion,
+            dismiss_suggestion,
             list_models,
             list_agents,
             save_agent,
@@ -326,6 +519,10 @@ pub fn run() {
             atera_refresh,
             atera_set_key,
             atera_set_customer_hidden,
+            unifi_fleet,
+            unifi_refresh,
+            unifi_set_key,
+            unifi_set_site_hidden,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
