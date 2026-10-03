@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::secrets::CLAUDE_KEY;
-use crate::{atera, claude, db, mail, unifi, Core};
+use crate::{atera, claude, db, mail, pomodoro, unifi, Core};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -145,6 +145,22 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             core.changed("reminders-changed");
             ok(r)
         }
+
+        // ---------- Pomodoro ----------
+        "pomodoro_get" => ok(pomodoro::get(core)),
+        "pomodoro_start" => {
+            #[derive(Deserialize)]
+            struct A {
+                phase: pomodoro::Phase,
+                minutes: Option<i64>,
+            }
+            let A { phase, minutes } = args(a)?;
+            ok(pomodoro::start(core, phase, minutes))
+        }
+        "pomodoro_pause" => ok(pomodoro::pause(core)),
+        "pomodoro_resume" => ok(pomodoro::resume(core)),
+        "pomodoro_reset" => ok(pomodoro::reset(core)),
+        "pomodoro_dismiss" => ok(pomodoro::dismiss(core)),
 
         // ---------- Projects ----------
         "list_projects" => ok(db::list_projects(&conn()).map_err(err)?),

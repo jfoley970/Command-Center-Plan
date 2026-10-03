@@ -12,6 +12,7 @@ import Reminders from "./pages/Reminders";
 import Agents from "./pages/Agents";
 import Settings from "./pages/Settings";
 import ReminderAlerts from "./ReminderAlerts";
+import TopBar from "./TopBar";
 import "./styles.css";
 
 export type Page = "dashboard" | "inbox" | "projects" | "todos" | "reminders" | "agents" | "settings";
@@ -103,6 +104,7 @@ function Shell() {
       </main>
 
       <ReminderAlerts />
+      <TopBar />
 
       <Palette
         open={paletteOpen}
