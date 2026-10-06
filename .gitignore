@@ -25,3 +25,7 @@ dist-ssr
 
 # Rust build output (workspace root)
 /target
+
+# Server deployment: filled-in settings and the secret key never go in git
+/deploy/.env
+/deploy/secrets/
