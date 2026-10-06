@@ -18,7 +18,7 @@ Data is stored locally in SQLite in the app's data folder.
 The backend is a shared Rust crate (`crates/cc-core`) that runs in two places:
 
 - **In the desktop app** (local mode), as it always has.
-- **On a server** (`crates/cc-server`), which also serves the same UI to any browser. This is the target setup: one Linux box holds the data and keys and does the polling, and every machine is a thin client over WireGuard. See [deploy/README.md](deploy/README.md).
+- **On a server** (`crates/cc-server`), which also serves the same UI to any browser. This is the target setup: one Linux box holds the data and keys and does the polling, and any browser, at home or away, reaches it at a public name behind your own sign-in with MFA. See [deploy/README.md](deploy/README.md).
 
 ## Getting installers
 
