@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Page } from "../App";
-import { keyStore } from "../transport";
+import { isDesktop, keyStore } from "../transport";
+import ServerSettings from "./ServerSettings";
 import { allConnectors, type Connector } from "../connectors";
 import type { ConnectorState } from "../connectors/registry";
 
@@ -40,12 +41,20 @@ export default function Settings({ go }: { go: (p: Page) => void }) {
         })}
       </section>
 
+      {isDesktop && <ServerSettings />}
+
       <section className="card stack">
         <h2>Shortcuts</h2>
         <ul className="list plain">
           <li><kbd>Ctrl/Cmd</kbd> + <kbd>K</kbd> opens quick actions inside the app.</li>
-          <li><kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd> brings the app forward from anywhere.</li>
-          <li>Closing the window keeps the app in the tray so reminders still fire. Quit from the tray icon.</li>
+          {isDesktop ? (
+            <>
+              <li><kbd>Ctrl/Cmd</kbd> + <kbd>Shift</kbd> + <kbd>Space</kbd> brings the app forward from anywhere.</li>
+              <li>Closing the window keeps the app in the tray so reminders still fire. Quit from the tray icon.</li>
+            </>
+          ) : (
+            <li>Reminders and alerts show as browser notifications while this tab is open. The desktop app adds a tray icon and a global shortcut.</li>
+          )}
         </ul>
       </section>
     </div>

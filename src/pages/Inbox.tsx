@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { isDesktop, listen, openUrl } from "../transport";
+import { listen, onServer, openUrl } from "../transport";
 import { api, type Email, type MailAccount, type Suggestion } from "../api";
 import { useData } from "../data";
 import { formatWhen, fromLocalInput, toLocalInput } from "../time";
@@ -95,7 +95,7 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
       <h2>Connect a Microsoft 365 inbox</h2>
       <p className="muted">
         Command Center reads your inbox (read-only, it can never send or delete mail), summarizes it, and suggests todos and
-        reminders for you to approve. {isDesktop ? "Your sign-in stays in Windows Credential Manager." : "Your sign-in stays encrypted on the Command Center server."}
+        reminders for you to approve. {onServer ? "Your sign-in stays encrypted on the Command Center server." : "Your sign-in stays in your operating system's keychain."}
       </p>
       <label>
         Application (client) ID
@@ -106,7 +106,7 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
         <input value={tenantId} onChange={(e) => setTenantId(e.target.value)} placeholder="00000000-0000-0000-0000-000000000000" autoComplete="off" />
       </label>
       <p className="muted small">Both are on the Overview page of the Command Center app registration at entra.microsoft.com.</p>
-      {!isDesktop && (
+      {onServer && (
         <p className="muted small">In the app registration, turn on Authentication &gt; Allow public client flows, so the server can sign in with a code.</p>
       )}
       {prompt && (
@@ -119,7 +119,7 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
       )}
       <div className="row">
         <button className="primary" type="submit" disabled={waiting || !clientId.trim() || !tenantId.trim()}>
-          {waiting ? (isDesktop ? "Finish signing in in your browser…" : "Waiting for Microsoft sign-in…") : "Sign in with Microsoft"}
+          {waiting ? (onServer ? "Waiting for Microsoft sign-in…" : "Finish signing in in your browser…") : "Sign in with Microsoft"}
         </button>
         {onCancel && !waiting && <button type="button" onClick={onCancel}>Cancel</button>}
       </div>

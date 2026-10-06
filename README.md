@@ -20,6 +20,8 @@ The backend is a shared Rust crate (`crates/cc-core`) that runs in two places:
 - **In the desktop app** (local mode), as it always has.
 - **On a server** (`crates/cc-server`), which also serves the same UI to any browser. This is the target setup: one Linux box holds the data and keys and does the polling, and any browser, at home or away, reaches it at a public name behind your own sign-in with MFA. See [deploy/README.md](deploy/README.md).
 
+The desktop app can also run on the server (Settings > Command Center server). Then the desktop app and the web app are mirror images: one set of data, connectors and dashboard layout, with the desktop app adding the tray, the global shortcut and OS notifications. The same card copies connectors set up on the desktop to the server. Every connector lives in `cc-core`, so a connector added for one is there for both.
+
 ## Getting installers
 
 Every push to `main` builds a `.dmg` for macOS and `.msi` / `.exe` installers for Windows in GitHub Actions. Download them from the run's **Artifacts** section. The builds are not code-signed yet, so macOS will ask you to right-click and choose Open the first time, and Windows SmartScreen may show "More info, Run anyway".
@@ -60,9 +62,11 @@ crates/cc-core/src/  the backend, shared by the desktop app and the server
   claude.rs          Claude Messages API client
   mail.rs            Microsoft 365 sign-in, Graph sync, digests
   atera.rs, unifi.rs connectors
+  transfer.rs        moving connectors from the desktop app to the server
   secrets.rs         OS keychain (desktop) or encrypted file (server)
 crates/cc-server/    HTTP + WebSocket API, sign-in checks, serves the web UI
 src-tauri/src/lib.rs desktop shell: tray, global shortcut, notifications
+src-tauri/src/remote.rs server mode: the desktop app as a client of cc-server
 deploy/              Docker Compose, Caddy and setup notes for the server
 ```
 

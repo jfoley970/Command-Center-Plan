@@ -10,6 +10,7 @@ pub mod db;
 pub mod mail;
 pub mod pomodoro;
 pub mod secrets;
+pub mod transfer;
 pub mod unifi;
 
 use serde::Serialize;

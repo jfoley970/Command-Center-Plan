@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ReactGridLayout, { useContainerWidth, verticalCompactor, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { api } from "../api";
 import { useData } from "../data";
+import { listen } from "../transport";
 import type { Page } from "../App";
 import CommandBar from "../widgets/CommandBar";
 import Kpis from "../widgets/Kpis";
@@ -30,27 +31,99 @@ const DEFAULT_LAYOUT: Layout = [
   { i: "unifi", x: 0, y: 29, w: 12, h: 8, minH: 4, minW: 4 },
 ];
 
-// Layout is a per-device convenience, so browser storage is fine; it must never break the page.
-function loadLayout(): Layout {
+type Saved = Pick<Layout[number], "i" | "x" | "y" | "w" | "h">[];
+const LAYOUT_SETTING = "dashboard.layout";
+
+// Keep constraints from the defaults and add any widget that is new since the save.
+function fromSaved(saved: unknown): Layout {
+  if (!Array.isArray(saved)) return DEFAULT_LAYOUT;
+  return DEFAULT_LAYOUT.map((d) => {
+    const s = (saved as Saved).find((x) => x.i === d.i);
+    return s ? { ...d, x: s.x, y: s.y, w: s.w, h: s.h } : d;
+  });
+}
+
+function toSaved(layout: Layout): Saved {
+  return layout.map(({ i, x, y, w, h }) => ({ i, x, y, w, h }));
+}
+
+// The layout is kept with the data (see ui_set), so the desktop app and every
+// browser show the same dashboard. Browser storage is only a cache for the
+// first paint; it must never break the page.
+function cachedLayout(): Layout {
   try {
-    const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null") as Layout | null;
-    if (!Array.isArray(saved)) return DEFAULT_LAYOUT;
-    // Keep constraints from the defaults and add any widget that is new since the save.
-    return DEFAULT_LAYOUT.map((d) => {
-      const s = saved.find((x) => x.i === d.i);
-      return s ? { ...d, x: s.x, y: s.y, w: s.w, h: s.h } : d;
-    });
+    return fromSaved(JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null"));
   } catch {
     return DEFAULT_LAYOUT;
   }
 }
 
-function saveLayout(layout: Layout) {
+function hadCache(): boolean {
   try {
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout.map(({ i, x, y, w, h }) => ({ i, x, y, w, h }))));
+    return localStorage.getItem(LAYOUT_KEY) !== null;
   } catch {
-    /* storage unavailable; layout just won't persist */
+    return false;
   }
+}
+
+function cacheLayout(saved: Saved) {
+  try {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(saved));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** The shared dashboard layout: loads it, saves changes, and follows changes made elsewhere. */
+function useSharedLayout(): [Layout, (l: Layout) => void] {
+  const [layout, setLayout] = useState<Layout>(cachedLayout);
+  const last = useRef(JSON.stringify(toSaved(layout)));
+
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api
+        .uiGet<Saved>(LAYOUT_SETTING)
+        .then((saved) => {
+          if (!alive) return;
+          if (!saved) {
+            // Nothing shared yet: share the layout this device already had.
+            if (hadCache()) api.uiSet(LAYOUT_SETTING, JSON.parse(last.current)).catch(() => {});
+            return;
+          }
+          const text = JSON.stringify(saved);
+          if (text === last.current) return;
+          last.current = text;
+          cacheLayout(saved);
+          setLayout(fromSaved(saved));
+        })
+        .catch(() => {
+          /* offline: keep the cached layout */
+        });
+    load();
+    const un = listen<string>("ui-changed", (e) => {
+      if (e.payload === LAYOUT_SETTING || e.payload === null) load();
+    });
+    return () => {
+      alive = false;
+      void un.then((f) => f());
+    };
+  }, []);
+
+  const save = useCallback((l: Layout) => {
+    setLayout(l);
+    const saved = toSaved(l);
+    const text = JSON.stringify(saved);
+    // The grid reports its layout on every render; only real moves are saved.
+    if (text === last.current) return;
+    last.current = text;
+    cacheLayout(saved);
+    api.uiSet(LAYOUT_SETTING, saved).catch(() => {
+      /* offline: it is still cached here */
+    });
+  }, []);
+
+  return [layout, save];
 }
 
 function greeting(d: Date): string {
@@ -61,7 +134,7 @@ function greeting(d: Date): string {
 export default function Dashboard({ go }: { go: (p: Page) => void }) {
   const { agents, hasKey, act } = useData();
   const { width, containerRef, mounted } = useContainerWidth();
-  const [layout, setLayout] = useState<Layout>(loadLayout);
+  const [layout, saveLayout] = useSharedLayout();
   const [filter, setFilter] = useState<TodoFilter>("today");
   const [agentId, setAgentId] = useState<number | null>(null);
   const [now, setNow] = useState(() => new Date());
@@ -86,10 +159,7 @@ export default function Dashboard({ go }: { go: (p: Page) => void }) {
         <div className="row">
           <button
             className="ghost"
-            onClick={() => {
-              setLayout(DEFAULT_LAYOUT);
-              saveLayout(DEFAULT_LAYOUT);
-            }}
+            onClick={() => saveLayout(DEFAULT_LAYOUT)}
             title="Put every widget back where it started"
           >
             Reset layout
@@ -126,10 +196,7 @@ export default function Dashboard({ go }: { go: (p: Page) => void }) {
             gridConfig={{ cols: 12, rowHeight: 36, margin: [14, 14], containerPadding: [0, 0] }}
             dragConfig={{ handle: ".drag-handle", cancel: "button, input, select, textarea" }}
             compactor={verticalCompactor}
-            onLayoutChange={(l) => {
-              setLayout(l);
-              saveLayout(l);
-            }}
+            onLayoutChange={saveLayout}
           >
             <div key="kpis" className="bare"><Kpis filter={filter} setFilter={setFilter} /></div>
             <div key="timeline"><Timeline /></div>
