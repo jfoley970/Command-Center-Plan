@@ -6,9 +6,12 @@
 pub mod atera;
 pub mod claude;
 pub mod commands;
+pub mod cursor;
 pub mod db;
 pub mod mail;
+pub mod openai;
 pub mod pomodoro;
+pub mod providers;
 pub mod secrets;
 pub mod unifi;
 
@@ -95,13 +98,14 @@ impl Core {
     }
 }
 
-/// Starts the reminder, pomodoro, mail, Atera and UniFi loops. Call from inside a Tokio runtime.
+/// Starts the reminder, pomodoro, mail, Atera, UniFi and Cursor loops. Call from inside a Tokio runtime.
 pub fn start_background(core: &Arc<Core>) {
     tokio::spawn(reminder_loop(core.clone()));
     tokio::spawn(pomodoro::tick_loop(core.clone()));
     tokio::spawn(mail::sync_loop(core.clone()));
     tokio::spawn(atera::poll_loop(core.clone()));
     tokio::spawn(unifi::poll_loop(core.clone()));
+    tokio::spawn(cursor::poll_loop(core.clone()));
 }
 
 /// Checks for due reminders every 15 seconds.

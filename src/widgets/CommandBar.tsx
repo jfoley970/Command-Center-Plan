@@ -1,15 +1,17 @@
 import { useState, type FormEvent } from "react";
 import { api } from "../api";
+import { routeCommand } from "../agentRoute";
 import { useData } from "../data";
 import { minutesFromNow, quick, tomorrowAt9 } from "../quick";
 
 /** Type once, then choose what it becomes. Enter adds a todo. */
 export default function CommandBar({ onAsk }: { onAsk: (agentId: number) => void }) {
-  const { agents, hasKey, act } = useData();
+  const { agents, providers, hasKey, act } = useData();
   const [text, setText] = useState("");
   const [flash, setFlash] = useState<string | null>(null);
   const t = text.trim();
-  const planner = agents[0];
+  const planner = agents.find((a) => a.name === "Daily Planner") ?? agents[0];
+  const route = routeCommand(t, agents);
 
   async function run(label: string, fn: () => Promise<unknown>) {
     if (!t) return;
@@ -49,16 +51,23 @@ export default function CommandBar({ onAsk }: { onAsk: (agentId: number) => void
         <button
           type="button"
           className="primary"
-          disabled={!t || !hasKey || !planner}
-          title={hasKey ? "Ask an agent" : "Add your API key in Settings first"}
-          onClick={() => {
-            if (!planner) return;
+          disabled={!t || (!planner && route.kind === "default") || (route.kind === "default" && !hasKey)}
+          title="Ask an agent. Start with grok:, chatgpt:, @cursor or an agent's name to pick who answers."
+          onClick={async () => {
             // Runs can take a while; clear the bar now and let the agent widget show progress.
-            onAsk(planner.id);
+            const target =
+              route.kind === "agent" ? agents.find((a) => a.id === route.agentId)?.name
+              : route.kind === "provider" ? providers.find((p) => p.id === route.provider)?.name
+              : planner?.name;
+            if (route.kind !== "provider") onAsk(route.kind === "agent" ? route.agentId : planner.id);
             setText("");
-            setFlash(`Sent to ${planner.name}`);
+            setFlash(`Sent to ${target ?? "agent"}`);
             setTimeout(() => setFlash(null), 2500);
-            act(() => api.runAgent(planner.id, t));
+            const run = await act(() =>
+              route.kind === "provider" ? api.askProvider(route.provider, route.text)
+              : api.runAgent(route.kind === "agent" ? route.agentId : planner.id, route.text),
+            );
+            if (run) onAsk(run.agent_id);
           }}
         >
           Ask agent

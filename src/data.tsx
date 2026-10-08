@@ -1,7 +1,7 @@
 // One shared copy of the app's data, refreshed after any change or backend event.
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { listen } from "./transport";
-import { api, errorText, type Agent, type AgentRun, type FlagLink, type MailAccount, type Project, type Reminder, type Suggestion, type Todo } from "./api";
+import { api, errorText, type Agent, type AgentRun, type FlagLink, type Provider, type MailAccount, type Project, type Reminder, type Suggestion, type Todo } from "./api";
 
 type Data = {
   todos: Todo[];
@@ -12,6 +12,8 @@ type Data = {
   flagLinks: FlagLink[];
   agents: Agent[];
   runs: AgentRun[];
+  providers: Provider[];
+  /** Whether the Claude key is saved. */
   hasKey: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -31,12 +33,13 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const [flagLinks, setFlagLinks] = useState<FlagLink[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [providers, setProviders] = useState<Provider[]>([]);
   const [hasKey, setHasKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [t, r, p, m, s, f, a, ru, k] = await Promise.all([
+      const [t, r, p, m, s, f, a, ru, k, pr] = await Promise.all([
         api.listTodos(),
         api.listReminders(),
         api.listProjects(),
@@ -46,6 +49,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         api.listAgents(),
         api.listRuns(undefined, 50),
         api.hasApiKey(),
+        api.listProviders(),
       ]);
       setTodos(t);
       setReminders(r);
@@ -56,6 +60,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       setAgents(a);
       setRuns(ru);
       setHasKey(k);
+      setProviders(pr);
     } catch (e) {
       setError(errorText(e));
     }
@@ -83,6 +88,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       listen("reminders-fired", () => refresh()),
       listen("reminders-changed", () => refresh()),
       listen("mail-changed", () => refresh()),
+      listen("providers-changed", () => refresh()),
     ]);
     // Keeps relative labels like "overdue" current.
     const timer = setInterval(refresh, 60_000);
@@ -93,7 +99,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   return (
-    <DataContext.Provider value={{ todos, reminders, projects, mailAccounts, suggestions, flagLinks, agents, runs, hasKey, error, refresh, setError, act }}>
+    <DataContext.Provider value={{ todos, reminders, projects, mailAccounts, suggestions, flagLinks, agents, runs, providers, hasKey, error, refresh, setError, act }}>
       {children}
     </DataContext.Provider>
   );
