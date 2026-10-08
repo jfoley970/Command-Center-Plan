@@ -89,6 +89,16 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             let A { id, priority } = args(a)?;
             ok(db::set_todo_priority(&conn(), id, priority).map_err(err)?)
         }
+        "set_todo_notes" => {
+            #[derive(Deserialize)]
+            struct A {
+                id: i64,
+                notes: String,
+            }
+            let A { id, notes } = args(a)?;
+            ok(db::set_todo_notes(&conn(), id, &notes).map_err(err)?)
+        }
+        "todo_email" => ok(db::todo_email(&conn(), args::<Id>(a)?.id).map_err(err)?),
         "delete_todo" => ok(db::delete_todo(&conn(), args::<Id>(a)?.id).map_err(err)?),
 
         // ---------- Reminders ----------
