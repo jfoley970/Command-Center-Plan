@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::secrets::{self, ATERA_KEY, CLAUDE_KEY, UNIFI_KEY};
+use crate::secrets::{self, ATERA_KEY, CLAUDE_KEY, CURSOR_KEY, OPENAI_KEY, UNIFI_KEY, XAI_KEY};
 use crate::{atera, db, unifi, Core};
 
 /// A connector that can be moved, and the secret it is keyed by.
@@ -28,6 +28,9 @@ const KINDS: &[Kind] = &[
     Kind { id: "atera", name: "Atera", secret: Some(ATERA_KEY) },
     Kind { id: "unifi", name: "UniFi Site Manager", secret: Some(UNIFI_KEY) },
     Kind { id: "microsoft365", name: "Microsoft 365", secret: None },
+    Kind { id: "cursor", name: "Cursor", secret: Some(CURSOR_KEY) },
+    Kind { id: "chatgpt", name: "ChatGPT", secret: Some(OPENAI_KEY) },
+    Kind { id: "grok", name: "Grok", secret: Some(XAI_KEY) },
 ];
 
 /// What a Command Center has set up, without any keys. Used to show which
@@ -175,7 +178,7 @@ pub async fn import(core: &Arc<Core>, bundles: Vec<ConnectorBundle>) -> Result<V
             }
         }
         let outcome: Result<String, String> = match kind.id {
-            "claude" => Ok("Key saved".into()),
+            "claude" | "cursor" | "chatgpt" | "grok" => Ok("Key saved".into()),
             "atera" => {
                 for c in b.hidden_customers {
                     core.atera.set_hidden(c, true)?;
@@ -197,7 +200,7 @@ pub async fn import(core: &Arc<Core>, bundles: Vec<ConnectorBundle>) -> Result<V
             Err(detail) => ImportResult { id: b.id, ok: false, detail },
         });
     }
-    for name in ["atera-changed", "unifi-changed", "mail-changed", "connectors-changed"] {
+    for name in ["atera-changed", "unifi-changed", "mail-changed", "providers-changed", "connectors-changed"] {
         core.changed(name);
     }
     Ok(results)
