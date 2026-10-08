@@ -8,8 +8,41 @@ import { openUrl as tauriOpenUrl } from "@tauri-apps/plugin-opener";
 
 export const isDesktop = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** How the desktop app reaches its data: in process (local) or through a Command Center server. */
+export type DesktopServer = {
+  mode: "local" | "server";
+  url: string;
+  username: string;
+  hasToken: boolean;
+  connected: boolean;
+  error: string | null;
+};
+
+const SERVER_STORE = "the Command Center server's encrypted key store";
+
+/**
+ * True when data and keys live on a Command Center server: always in a browser,
+ * and in the desktop app once it is pointed at one. Then the desktop app and
+ * every browser are the same app on the same data.
+ */
+export let onServer = !isDesktop;
+
 /** Where keys pasted into the app end up, for help text. */
-export const keyStore = isDesktop ? "your operating system's keychain" : "the server's encrypted key store";
+export let keyStore = isDesktop ? "your operating system's keychain" : SERVER_STORE;
+
+/** Call once before the first render. */
+export async function initTransport(): Promise<void> {
+  if (!isDesktop) return;
+  try {
+    const s = await invoke<DesktopServer>("desktop_server_get");
+    if (s.mode === "server") {
+      onServer = true;
+      keyStore = SERVER_STORE;
+    }
+  } catch {
+    // An older shell without server mode: stay local.
+  }
+}
 
 export async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (isDesktop) return invoke<T>("call", { command, args: args ?? null });

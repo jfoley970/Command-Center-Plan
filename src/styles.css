@@ -355,6 +355,7 @@ button.danger { color: var(--p1); }
 .conn-head { display: flex; align-items: center; gap: 0.7rem; width: 100%; background: none; border: none; padding: 0.6rem 0.8rem; text-align: left; color: var(--text); }
 .conn-head:hover:not(:disabled) { background: var(--raised); border: none; }
 .conn-head:disabled { opacity: 1; cursor: default; }
+label.conn-head { flex-direction: row; cursor: pointer; font-size: inherit; }
 .conn-text { display: flex; flex-direction: column; min-width: 0; }
 .conn-name { font-weight: 600; }
 .conn-chevron { color: var(--muted); width: 1rem; text-align: center; }

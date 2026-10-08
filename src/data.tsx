@@ -88,6 +88,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       listen("reminders-fired", () => refresh()),
       listen("reminders-changed", () => refresh()),
       listen("mail-changed", () => refresh()),
+      listen("connectors-changed", () => refresh()),
       listen("providers-changed", () => refresh()),
     ]);
     // Keeps relative labels like "overdue" current.

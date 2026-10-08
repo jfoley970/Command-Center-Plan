@@ -149,6 +149,10 @@ export type CursorMessage = { from: "you" | "cursor"; text: string };
 
 export type ModelOption = { id: string; label: string };
 
+/** A connector as one Command Center has it, without any keys. */
+export type ConnectorSummary = { id: string; name: string; configured: boolean; detail: string };
+export type ImportResult = { id: string; ok: boolean; detail: string };
+
 export const api = {
   listTodos: () => call<Todo[]>("list_todos"),
   addTodo: (todo: { title: string; notes?: string; priority?: number; due_at?: string | null; project_id?: number | null }) =>
@@ -202,6 +206,12 @@ export const api = {
   cursorConversation: (runId: number) => call<CursorMessage[]>("cursor_conversation", { runId }),
   cursorFollowup: (runId: number, text: string) => call<AgentRun>("cursor_followup", { runId, text }),
   cursorStop: (runId: number) => call<void>("cursor_stop", { runId }),
+
+  connectorSummary: () => call<ConnectorSummary[]>("connector_summary"),
+
+  /** View settings such as the dashboard layout, shared by the desktop app and every browser. */
+  uiGet: <T>(key: string) => call<T | null>("ui_get", { key }),
+  uiSet: (key: string, value: unknown) => call<void>("ui_set", { key, value }),
 
   hasApiKey: () => call<boolean>("has_api_key"),
   setApiKey: (key: string) => call<void>("set_api_key", { key }),

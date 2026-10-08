@@ -92,16 +92,49 @@ and the encrypted `secrets.enc` together unlock every stored API key.
   `docker-compose.yml` and the NAT rule. The app keeps working over WireGuard at
   the same name (via split-horizon DNS).
 
-## Moving from the desktop app
+## The desktop app on the server
 
-- **Data:** copy `command-center.db` (and the `*-hidden-*.json` files) from the
-  desktop app's data folder (`%APPDATA%\com.james.commandcenter` on Windows) into
-  the `cc-data` volume while the server is stopped.
-- **Keys:** paste the Claude, Atera and UniFi keys again in Settings > Connections.
-  They are not copied out of Windows Credential Manager.
-- **Microsoft 365:** reconnect each inbox. On the server, sign-in shows a code to
-  enter at microsoft.com/devicelogin from any device. In the Entra app
-  registration, turn on *Authentication > Allow public client flows*.
+The desktop app and the web app are the same app. Point the desktop app at the
+server and it shows the same todos, reminders, dashboard layout, agents and
+connectors as any browser, live, while keeping its tray icon, global shortcut
+and OS notifications. Keys stay on the server; the desktop app only holds its
+own sign-in.
+
+1. **An app password for each computer.** The desktop app can't do a browser
+   sign-in with a passkey for every request, so it signs in like a script: in
+   Authentik, under your user's *Settings > Tokens and App passwords*, create an
+   app password named after the computer. Revoke it there if the computer is
+   lost. The proxy provider must have *Intercept header authentication* on (the
+   default), which lets Authentik accept `Authorization: Basic user:app-password`
+   in place of a browser session. Without Authentik (a lab box), leave the
+   username empty and use cc-server's `CC_API_TOKEN` instead.
+2. **Settings > Command Center server** in the desktop app: enter
+   `https://<CC_PUBLIC_HOST>`, your Authentik username and the app password,
+   then *Save and test*. The password goes to Windows Credential Manager.
+3. **Move connectors.** The same card lists every connector on this computer
+   and on the server. Tick the ones to copy and choose *Copy to the server*:
+   the Claude, Atera and UniFi keys, Atera hidden customers and UniFi hidden
+   sites, and each signed-in Microsoft 365 inbox (its app registration and
+   sign-in). Keys go from the keychain straight to the server's encrypted
+   store over HTTPS; there is no API that reads a key back out. Each connector
+   reports whether it works from the server.
+4. **Switch this app to the server.** The app restarts on the server's data.
+   *Use this computer's data instead* switches back; local data is left as it
+   was. In server mode the desktop app runs no polling of its own, so alerts
+   and reminders are not doubled.
+
+If a moved Microsoft 365 inbox shows a sign-in error on the server, reconnect it
+from the Inbox page: on the server, sign-in shows a code to enter at
+microsoft.com/devicelogin from any device. In the Entra app registration, turn on
+*Authentication > Allow public client flows*.
+
+### Moving todos, reminders and agents
+
+Connectors move from the app. For the rest of the data, copy
+`command-center.db` from the desktop app's data folder
+(`%APPDATA%\com.james.commandcenter` on Windows) into the `cc-data` volume while
+the server is stopped and before you first use it, since this replaces the
+server's data.
 
 ## Local models
 

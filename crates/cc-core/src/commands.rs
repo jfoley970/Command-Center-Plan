@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::secrets::CLAUDE_KEY;
-use crate::{atera, claude, cursor, db, mail, openai, pomodoro, providers, unifi, Core};
+use crate::{atera, claude, cursor, db, mail, openai, pomodoro, providers, transfer, unifi, Core};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -388,11 +388,62 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             ok(())
         }
 
+        // ---------- Connectors moving between Command Centers ----------
+        // There is deliberately no export command: keys never leave over the API.
+        "connector_summary" => ok(transfer::summary(core)?),
+        "import_connectors" => {
+            #[derive(Deserialize)]
+            struct A {
+                connectors: Vec<transfer::ConnectorBundle>,
+            }
+            ok(transfer::import(core, args::<A>(a)?.connectors).await?)
+        }
+
+        // ---------- Layout and other view preferences ----------
+        // Kept with the data rather than in the browser, so the desktop app and
+        // every browser show the same dashboard.
+        "ui_get" => {
+            #[derive(Deserialize)]
+            struct A {
+                key: String,
+            }
+            let key = ui_key(&args::<A>(a)?.key)?;
+            let value = db::get_setting(&conn(), &key).map_err(err)?;
+            ok(value.and_then(|v| serde_json::from_str::<Value>(&v).ok()))
+        }
+        "ui_set" => {
+            #[derive(Deserialize)]
+            struct A {
+                key: String,
+                value: Value,
+            }
+            let A { key, value } = args(a)?;
+            let key = ui_key(&key)?;
+            let text = value.to_string();
+            if text.len() > 64 * 1024 {
+                return Err("That view setting is too large to save.".into());
+            }
+            db::set_setting(&conn(), &key, &text).map_err(err)?;
+            core.emit("ui-changed", &key[3..]);
+            ok(())
+        }
+
         // ---------- Settings ----------
         "has_api_key" => ok(core.secrets.get(CLAUDE_KEY)?.is_some()),
         "set_api_key" => ok(core.secrets.set(CLAUDE_KEY, &args::<Key>(a)?.key)?),
 
         _ => Err(format!("Unknown command: {command}")),
+    }
+}
+
+/// View settings share the settings table under a `ui:` prefix, so a UI key can
+/// never overwrite a backend setting such as the Microsoft app registration.
+fn ui_key(key: &str) -> CmdResult<String> {
+    let ok = !key.is_empty() && key.len() <= 64 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+    if ok {
+        Ok(format!("ui:{key}"))
+    } else {
+        Err("Bad view setting name.".into())
     }
 }
 
@@ -533,6 +584,18 @@ mod tests {
             call(&core, "set_api_key", json!({ "key": "sk-test" })).await.unwrap();
             assert_eq!(call(&core, "has_api_key", Value::Null).await.unwrap(), json!(true));
         }
+        std::fs::remove_dir_all(&core.data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn view_settings_round_trip_and_stay_in_their_namespace() {
+        let core = core();
+        assert_eq!(call(&core, "ui_get", json!({ "key": "dashboard.layout" })).await.unwrap(), Value::Null);
+        let layout = json!([{ "i": "todos", "x": 0, "y": 0, "w": 4, "h": 6 }]);
+        call(&core, "ui_set", json!({ "key": "dashboard.layout", "value": layout })).await.unwrap();
+        assert_eq!(call(&core, "ui_get", json!({ "key": "dashboard.layout" })).await.unwrap(), layout);
+        assert!(call(&core, "ui_set", json!({ "key": "../ms_client_id", "value": 1 })).await.is_err());
+        assert!(db::get_setting(&core.db.0.lock().unwrap(), "ms_client_id").unwrap().is_none());
         std::fs::remove_dir_all(&core.data_dir).unwrap();
     }
 

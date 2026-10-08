@@ -13,6 +13,7 @@ pub mod openai;
 pub mod pomodoro;
 pub mod providers;
 pub mod secrets;
+pub mod transfer;
 pub mod unifi;
 
 use serde::Serialize;
