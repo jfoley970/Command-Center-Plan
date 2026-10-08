@@ -1,8 +1,8 @@
 //! cc-server: runs the Command Center backend on a server and serves the web UI.
 //!
 //! It is meant to sit behind a reverse proxy (Caddy) that terminates TLS and
-//! hands sign-in to the local auth service, reached only over WireGuard. The
-//! server itself trusts nothing by default:
+//! hands sign-in to the local auth service. The proxy may face the internet, so
+//! the server itself trusts nothing by default:
 //!
 //! - `CC_AUTH_HEADER` (for example `X-Authentik-Username`): every API request
 //!   must carry this header, which the proxy sets after sign-in and strips
@@ -10,6 +10,8 @@
 //! - `CC_API_TOKEN`: requests may instead carry `Authorization: Bearer <token>`
 //!   (scripts, health checks from other machines).
 //! - With neither set it only listens on loopback.
+//! - Browser requests from another site are refused (their `Origin` must
+//!   match the `Host` they were sent to), on the API and the WebSocket alike.
 //!
 //! Other settings: `CC_BIND` (default 127.0.0.1:8484), `CC_DATA_DIR` (default
 //! ./data), `CC_WEB_DIR` (the built frontend, default ./dist), and
@@ -110,6 +112,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// `POST /api/call/<command>` with the JSON arguments the frontend would pass to Tauri.
 async fn call(State(s): State<AppState>, Path(command): Path<String>, headers: HeaderMap, body: String) -> Response {
+    if !same_origin(&headers) {
+        return (StatusCode::FORBIDDEN, "Cross-site request refused.").into_response();
+    }
     // Requiring a JSON content type means a cross-site form can't make this request
     // without a CORS preflight, which this server never approves.
     let is_json = headers
@@ -133,16 +138,22 @@ async fn call(State(s): State<AppState>, Path(command): Path<String>, headers: H
     }
 }
 
-/// `GET /api/events`: a WebSocket that streams every backend event as JSON.
-async fn events(State(s): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    // Browsers send Origin on WebSockets; only accept our own page.
+/// Browsers send `Origin` on WebSockets and on cross-site POSTs; only accept our
+/// own page. Requests without it (scripts, same-origin GETs) pass on to sign-in.
+fn same_origin(headers: &HeaderMap) -> bool {
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    if let (Some(origin), Some(host)) = (origin, host) {
-        let origin_host = origin.split("://").nth(1).unwrap_or(origin);
-        if origin_host != host {
-            return (StatusCode::FORBIDDEN, "Cross-site connection refused.").into_response();
-        }
+    match (origin, host) {
+        (Some(origin), Some(host)) => origin.split("://").nth(1).unwrap_or(origin).eq_ignore_ascii_case(host),
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+/// `GET /api/events`: a WebSocket that streams every backend event as JSON.
+async fn events(State(s): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    if !same_origin(&headers) {
+        return (StatusCode::FORBIDDEN, "Cross-site connection refused.").into_response();
     }
     ws.on_upgrade(move |socket| stream_events(socket, s.core))
 }
@@ -258,6 +269,22 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(app.oneshot(form).await.unwrap().status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cross_site_calls_are_refused() {
+        let (app, dir) = app(Auth { header: None, token: None });
+        let from = |origin: &str| {
+            post("/api/call/list_todos")
+                .header(header::HOST, "cc.example.com")
+                .header(header::ORIGIN, origin)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(app.clone().oneshot(from("https://cc.example.com")).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(app.clone().oneshot(from("https://evil.example")).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(app.oneshot(from("https://cc.example.com.evil.example")).await.unwrap().status(), StatusCode::FORBIDDEN);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
