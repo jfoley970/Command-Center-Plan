@@ -274,6 +274,16 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 /* Agent console */
 .console { display: flex; flex-direction: column; gap: 8px; height: 100%; }
 .console-input { display: flex; gap: 6px; }
+.cursor-run { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.cursor-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.cursor-steps .step { display: flex; gap: 8px; font-size: 0.85rem; }
+.cursor-steps .step-from { flex: 0 0 52px; color: var(--muted); font-size: 0.75rem; padding-top: 1px; }
+.cursor-steps .step-text { white-space: pre-wrap; color: var(--text-2); }
+.cursor-steps .step.you .step-text { color: var(--text); }
+button.danger { color: var(--p1); }
+.ai-strip { display: flex; gap: 6px; flex-wrap: wrap; }
+.ai-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 0.2rem 0.65rem; border-radius: 999px; color: var(--text-2); }
+.ai-chip.active { color: var(--text); border-color: var(--accent); background: rgba(57, 135, 229, 0.12); }
 .console-input input { flex: 1; min-width: 0; }
 .console-output { flex: 1; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-height: 60px; }
 .run-output { white-space: pre-wrap; line-height: 1.5; }
@@ -357,6 +367,54 @@ label.conn-head { flex-direction: row; cursor: pointer; font-size: inherit; }
   letter-spacing: 0.15em;
   margin: 0;
 }
+
+/* Todos widget: todos grouped into an expandable project tree */
+.list.tree li.tree-head { padding: 0; margin-top: 2px; }
+.tree-toggle {
+  display: flex; align-items: center; gap: 0.5rem; flex: 1; min-width: 0; padding: 0.35rem 0.25rem;
+  border: none; background: transparent; color: var(--text-2); font-size: 0.82rem; font-weight: 600; text-align: left;
+}
+.tree-toggle:hover:not(:disabled) { border: none; background: transparent; color: var(--text); }
+.tree-toggle .chevron { color: var(--muted); flex-shrink: 0; transition: transform 0.12s ease; }
+.tree-toggle[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+.tree-toggle .dot { width: 8px; height: 8px; }
+.dot.none { background: transparent; border: 1px dashed var(--muted); }
+.target-chip {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.1rem 0.55rem; border-radius: 999px; font-size: 0.75rem; color: var(--text-2);
+}
+.target-chip .dot { width: 8px; height: 8px; }
+/* Todos inside a project use its color: solid for high priority, lighter for normal, an outline for low. */
+.list li.in-project input[type="checkbox"] { accent-color: var(--proj); }
+.list li.in-project .prio-btn, .list li.in-project .prio-btn:hover { background: var(--proj); }
+.list li.in-project .prio-btn.p2, .list li.in-project .prio-btn.p2:hover { opacity: 0.55; }
+.list li.in-project .prio-btn.p3, .list li.in-project .prio-btn.p3:hover { background: transparent; box-shadow: inset 0 0 0 1.5px var(--proj); }
+
+/* Todos widget: selectable rows that expand into details */
+.list.dense li[tabindex] { cursor: default; outline: none; }
+.list.dense li[tabindex]:focus-visible { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.list.dense li.selected { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.list.dense li.selected.in-project { box-shadow: inset 2px 0 0 var(--proj); }
+.expand-btn {
+  display: grid; place-items: center; width: 16px; height: 16px; padding: 0; margin-right: -0.3rem;
+  border: none; background: transparent; color: var(--muted); flex-shrink: 0;
+}
+.expand-btn:hover:not(:disabled) { border: none; background: transparent; color: var(--text); }
+.expand-btn .chevron { transition: transform 0.12s ease; }
+.expand-btn[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+.mail-mark { display: grid; place-items: center; color: var(--muted); flex-shrink: 0; }
+.notes-mark { font-size: 0.7rem; color: var(--muted); }
+.list.dense li.detail-row { display: block; padding-top: 0; padding-bottom: 0.5rem; }
+.list.dense li.detail-row:hover { background: transparent; }
+.todo-detail { display: flex; flex-direction: column; gap: 0.45rem; padding: 0.15rem 0 0.2rem 0.6rem; border-left: 1px solid var(--border); }
+.email-card { display: flex; flex-direction: column; gap: 0.3rem; padding: 0.55rem 0.7rem; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border); font-size: 0.85rem; }
+.email-card strong { font-weight: 600; min-width: 0; }
+.email-card .small-btn { font-size: 0.75rem; padding: 0.15rem 0.55rem; flex-shrink: 0; }
+.email-meta > span:last-child { white-space: nowrap; flex-shrink: 0; }
+.email-meta { display: flex; justify-content: space-between; gap: 0.6rem; font-size: 0.78rem; color: var(--text-2); min-width: 0; }
+.email-preview { margin: 0; color: var(--text-2); font-size: 0.82rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.todo-notes { width: 100%; resize: vertical; font-size: 0.85rem; min-height: 2.4rem; }
+.todo-detail .small { margin: 0; font-size: 0.72rem; }
 
 /* ---------- Reminders: change time in place, and the popup when one goes off ---------- */
 .tag-btn { cursor: pointer; font: inherit; font-size: 0.75rem; padding: 0.1rem 0.5rem; }

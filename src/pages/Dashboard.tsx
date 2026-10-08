@@ -203,7 +203,7 @@ export default function Dashboard({ go }: { go: (p: Page) => void }) {
             <div key="todos"><TodosWidget filter={filter} setFilter={setFilter} /></div>
             <div key="reminders"><RemindersWidget /></div>
             <div key="agent">
-              <AgentConsole agentId={agentId} setAgentId={setAgentId} onOpenAgents={() => go("agents")} />
+              <AgentConsole agentId={agentId} setAgentId={setAgentId} onOpenAgents={() => go("agents")} onOpenSettings={() => go("settings")} />
             </div>
             <div key="trend"><Trend /></div>
             <div key="atera"><AteraAlerts /></div>

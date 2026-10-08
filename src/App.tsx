@@ -125,7 +125,7 @@ function Palette(props: {
   go: (p: Page) => void;
   showAgent: (id: number) => void;
 }) {
-  const { agents, hasKey, act } = useData();
+  const { agents, providers, act } = useData();
   const [search, setSearch] = useState("");
   const text = search.trim();
 
@@ -161,7 +161,7 @@ function Palette(props: {
               key={a.id}
               forceMount={!!text}
               value={`run ${a.name} ${text}`}
-              disabled={!hasKey}
+              disabled={!providers.find((p) => p.id === a.provider)?.connected}
               onSelect={() =>
                 done(() => {
                   props.showAgent(a.id);

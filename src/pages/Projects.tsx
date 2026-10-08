@@ -1,11 +1,12 @@
 import { useState, type FormEvent } from "react";
 import { api, type Project } from "../api";
 import { useData } from "../data";
+import { buildProjectTree, flattenTree, subtreeIds } from "../projectTree";
 import { formatWhen, fromLocalInput, isOverdue, toLocalInput } from "../time";
 
 const COLORS = ["#4c8dff", "#0ca30c", "#d95926", "#fab219", "#b36be0", "#e66767", "#2bb3b3", "#8a909b"];
 
-type Draft = { id?: number; name: string; description: string; color: string; archived: boolean };
+type Draft = { id?: number; name: string; description: string; color: string; archived: boolean; parent_id: number | null };
 
 function inAnHour(): string {
   const d = new Date(Date.now() + 60 * 60 * 1000);
@@ -18,15 +19,21 @@ export default function Projects({ selectedId, onSelect }: { selectedId: number 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [showArchived, setShowArchived] = useState(false);
 
-  const visible = projects.filter((p) => showArchived || !p.archived);
-  const project = projects.find((p) => p.id === selectedId) ?? visible[0];
+  const visible = flattenTree(buildProjectTree(projects.filter((p) => showArchived || !p.archived)));
+  const project = projects.find((p) => p.id === selectedId) ?? visible[0]?.project;
+  // A project can't move under itself or one of its own sub-projects.
+  const draftNode = draft?.id ? flattenTree(buildProjectTree(projects)).find((n) => n.project.id === draft.id) : undefined;
+  const blocked = new Set(draftNode ? subtreeIds(draftNode) : []);
+  const parentChoices = flattenTree(buildProjectTree(projects.filter((p) => !p.archived || p.id === draft?.parent_id))).filter(
+    (n) => !blocked.has(n.project.id),
+  );
   const openCount = (id: number) => todos.filter((t) => t.project_id === id && !t.done).length;
 
   function edit(p?: Project) {
     setDraft(
       p
-        ? { id: p.id, name: p.name, description: p.description, color: p.color, archived: p.archived }
-        : { name: "", description: "", color: COLORS[projects.length % COLORS.length], archived: false },
+        ? { id: p.id, name: p.name, description: p.description, color: p.color, archived: p.archived, parent_id: p.parent_id }
+        : { name: "", description: "", color: COLORS[projects.length % COLORS.length], archived: false, parent_id: null },
     );
   }
 
@@ -41,7 +48,7 @@ export default function Projects({ selectedId, onSelect }: { selectedId: number 
   }
 
   async function remove(p: Project) {
-    if (!confirm(`Delete the project "${p.name}"? Its tasks and reminders are kept, just unassigned.`)) return;
+    if (!confirm(`Delete the project "${p.name}"? Its tasks and reminders are kept, just unassigned, and any sub-projects move up a level.`)) return;
     await act(() => api.deleteProject(p.id));
     onSelect(null);
   }
@@ -55,9 +62,10 @@ export default function Projects({ selectedId, onSelect }: { selectedId: number 
         </div>
         {visible.length === 0 && <p className="muted">No projects yet.</p>}
         <ul className="list dense">
-          {visible.map((p) => (
+          {visible.map(({ project: p, depth }) => (
             <li
               key={p.id}
+              style={depth ? { paddingLeft: `${0.25 + depth * 1.1}rem` } : undefined}
               className={p.id === project?.id ? "active" : ""}
               onClick={() => {
                 setDraft(null);
@@ -85,6 +93,21 @@ export default function Projects({ selectedId, onSelect }: { selectedId: number 
             <label>
               Name
               <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} autoFocus />
+            </label>
+            <label>
+              Inside
+              <select
+                value={draft.parent_id ?? ""}
+                onChange={(e) => setDraft({ ...draft, parent_id: e.target.value ? Number(e.target.value) : null })}
+              >
+                <option value="">Top level</option>
+                {parentChoices.map(({ project: p, depth }) => (
+                  <option key={p.id} value={p.id}>
+                    {"\u00a0\u00a0".repeat(depth)}
+                    {p.name}
+                  </option>
+                ))}
+              </select>
             </label>
             <label>
               Description

@@ -80,6 +80,15 @@ export type FlagLink = {
   flagged: boolean;
 };
 
+export type TodoEmail = {
+  subject: string;
+  from_name: string;
+  from_addr: string;
+  received_at: string | null;
+  preview: string;
+  web_link: string;
+};
+
 export type Project = {
   id: number;
   name: string;
@@ -87,6 +96,7 @@ export type Project = {
   color: string;
   archived: boolean;
   created_at: string;
+  parent_id: number | null;
 };
 
 export type Agent = {
@@ -96,21 +106,46 @@ export type Agent = {
   system_prompt: string;
   model: string;
   created_at: string;
+  provider: ProviderId;
+  /** GitHub repository a Cursor agent works on. */
+  repo: string;
+  /** Whether runs include the day's open todos and reminders. */
+  include_context: boolean;
+};
+
+export type ProviderId = "claude" | "chatgpt" | "grok" | "cursor" | "copilot";
+
+export type Provider = {
+  id: ProviderId;
+  name: string;
+  connected: boolean;
+  /** Works on a repository and finishes later (Cursor). */
+  background: boolean;
+  /** Why it can't be used from the app yet, if it can't. */
+  unavailable: string | null;
+  models: ModelOption[];
 };
 
 export type AgentRun = {
   id: number;
   agent_id: number;
   agent_name: string;
+  provider: ProviderId;
   input: string;
   output: string;
-  status: "running" | "done" | "error" | "refused";
+  status: "running" | "done" | "error" | "refused" | "stopped";
   model: string;
   input_tokens: number;
   output_tokens: number;
   started_at: string;
   finished_at: string | null;
+  /** Where to see the result outside the app, such as a pull request. */
+  link: string;
+  /** The remote agent working on a background run (Cursor). */
+  external_id: string | null;
 };
+
+export type CursorMessage = { from: "you" | "cursor"; text: string };
 
 export type ModelOption = { id: string; label: string };
 
@@ -124,6 +159,8 @@ export const api = {
     call<Todo>("add_todo", { todo }),
   setTodoDone: (id: number, done: boolean) => call<void>("set_todo_done", { id, done }),
   setTodoPriority: (id: number, priority: number) => call<void>("set_todo_priority", { id, priority }),
+  setTodoNotes: (id: number, notes: string) => call<void>("set_todo_notes", { id, notes }),
+  todoEmail: (id: number) => call<TodoEmail | null>("todo_email", { id }),
   deleteTodo: (id: number) => call<void>("delete_todo", { id }),
 
   listReminders: () => call<Reminder[]>("list_reminders"),
@@ -162,6 +199,13 @@ export const api = {
   listRuns: (agentId?: number, limit?: number) =>
     call<AgentRun[]>("list_runs", { agentId: agentId ?? null, limit: limit ?? null }),
   runAgent: (agentId: number, input: string) => call<AgentRun>("run_agent", { agentId, input }),
+  listProviders: () => call<Provider[]>("list_providers"),
+  setProviderKey: (provider: ProviderId, key: string) => call<void>("set_provider_key", { provider, key }),
+  /** Asks a provider directly, using its first agent (made on first use). */
+  askProvider: (provider: ProviderId, input: string) => call<AgentRun>("ask_provider", { provider, input }),
+  cursorConversation: (runId: number) => call<CursorMessage[]>("cursor_conversation", { runId }),
+  cursorFollowup: (runId: number, text: string) => call<AgentRun>("cursor_followup", { runId, text }),
+  cursorStop: (runId: number) => call<void>("cursor_stop", { runId }),
 
   connectorSummary: () => call<ConnectorSummary[]>("connector_summary"),
 
