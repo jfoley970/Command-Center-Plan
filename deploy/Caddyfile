@@ -1,28 +1,68 @@
-# TLS for the app name, and sign-in through the local auth service before
-# anything reaches cc-server.
+# Command Center, published on the internet behind sign-in.
 #
-# Certificates: the default HTTP challenge needs Let's Encrypt to reach port 80,
-# which the WireGuard-only setup does not allow. Use the DNS challenge against
-# your DNS provider instead (needs a Caddy build with that provider's module),
-# or `tls internal` and trust Caddy's root on your machines.
+# Two names, both on an address from your public IP block (NAT 80 and 443 to
+# this server):
+#   {$CC_PUBLIC_HOST}  the app. Every path, the API and the WebSocket included,
+#                      needs a signed-in Authentik session with MFA.
+#   {$CC_AUTH_HOST}    Authentik's sign-in pages. Its admin interface is only
+#                      served to ADMIN_RANGES (the WireGuard subnet).
+#
+# Certificates come from Let's Encrypt automatically over port 80, so no DNS
+# plugin is needed.
+{
+	email {$ACME_EMAIL}
+	# Don't advertise HTTP/3; only TCP 443 is forwarded.
+	servers {
+		protocols h1 h2
+	}
+}
+
+(hardening) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		Permissions-Policy "camera=(), geolocation=(), microphone=(self)"
+		-Server
+	}
+	log {
+		output file /data/access.log {
+			roll_size 20MiB
+			roll_keep 10
+		}
+		format json
+	}
+}
 
 {$CC_PUBLIC_HOST} {
-	# tls {
-	# 	dns <provider> {env.DNS_API_TOKEN}
-	# }
-	tls internal
+	import hardening
+	header Content-Security-Policy "default-src 'self'; connect-src 'self' wss://{$CC_PUBLIC_HOST}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://{$CC_AUTH_HOST}"
 
 	# Authentik's outpost endpoints (login redirects and callbacks).
 	reverse_proxy /outpost.goauthentik.io/* {$AUTH_OUTPOST}
 
-	# Everything else needs a signed-in session. copy_headers also drops any
-	# X-Authentik-* header a client sends itself, so the identity cc-server sees
-	# always comes from the auth service.
+	# Everything else, health check, API and WebSocket included, needs a
+	# signed-in session. copy_headers also drops any X-Authentik-* header a client
+	# sends itself, so the identity cc-server sees always comes from Authentik.
 	forward_auth {$AUTH_OUTPOST} {
 		uri /outpost.goauthentik.io/auth/caddy
 		copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
-		trusted_proxies private_ranges
 	}
 
 	reverse_proxy cc-server:8484
+}
+
+{$CC_AUTH_HOST} {
+	import hardening
+
+	# The admin UI is for the WireGuard (admin) path only. Sign-in flows and the
+	# API they call stay public; the API itself requires an admin token.
+	@admin_from_outside {
+		path /if/admin/*
+		not remote_ip {$ADMIN_RANGES}
+	}
+	respond @admin_from_outside 404
+
+	reverse_proxy {$AUTH_OUTPOST}
 }

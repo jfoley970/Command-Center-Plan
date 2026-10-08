@@ -4,21 +4,27 @@
 #   openssl rand -hex 32 > secrets/cc-secret-key && chmod 600 secrets/cc-secret-key
 #   docker compose up -d --build
 #
-# Caddy is the only thing that listens on the network, and only on the
-# WireGuard address, so nothing here is reachable from the internet. The
-# WireGuard endpoint itself (UDP, on an address from the public IP block) runs
-# on the host or the edge router, not in this file.
+# Caddy is the only thing that listens on the network: on PUBLIC_ADDRESS (the
+# LAN address your edge NATs 80/443 to from the public IP block) and on the
+# WireGuard address. cc-server is never published; every request reaches it
+# through Caddy and Authentik sign-in. The WireGuard endpoint (the admin path)
+# runs on the host or the edge router, not in this file.
 
 services:
   caddy:
     image: caddy:2
     restart: unless-stopped
     ports:
-      - "${WG_ADDRESS}:443:443"
-      - "${WG_ADDRESS}:80:80"
+      # Port 80 only answers Let's Encrypt and redirects to HTTPS.
+      - "${PUBLIC_ADDRESS:?set PUBLIC_ADDRESS in .env}:443:443"
+      - "${PUBLIC_ADDRESS}:80:80"
+      - "${WG_ADDRESS:?set WG_ADDRESS in .env}:443:443"
     environment:
-      CC_PUBLIC_HOST: ${CC_PUBLIC_HOST}
-      AUTH_OUTPOST: ${AUTH_OUTPOST}
+      CC_PUBLIC_HOST: ${CC_PUBLIC_HOST:?set CC_PUBLIC_HOST in .env}
+      CC_AUTH_HOST: ${CC_AUTH_HOST:?set CC_AUTH_HOST in .env}
+      AUTH_OUTPOST: ${AUTH_OUTPOST:?set AUTH_OUTPOST in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+      ADMIN_RANGES: ${ADMIN_RANGES:?set ADMIN_RANGES in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

@@ -86,6 +86,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
     const unlisten = Promise.all([
       listen("runs-changed", () => refresh()),
       listen("reminders-fired", () => refresh()),
+      listen("reminders-changed", () => refresh()),
       listen("mail-changed", () => refresh()),
       listen("providers-changed", () => refresh()),
     ]);

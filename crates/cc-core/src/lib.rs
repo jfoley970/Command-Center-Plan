@@ -10,6 +10,7 @@ pub mod cursor;
 pub mod db;
 pub mod mail;
 pub mod openai;
+pub mod pomodoro;
 pub mod providers;
 pub mod secrets;
 pub mod unifi;
@@ -53,6 +54,7 @@ pub struct Core {
     pub secrets: Secrets,
     pub atera: atera::AteraState,
     pub unifi: unifi::UnifiState,
+    pub pomodoro: pomodoro::PomodoroState,
     pub sign_in: SignIn,
     pub data_dir: PathBuf,
     events: broadcast::Sender<Event>,
@@ -63,12 +65,14 @@ impl Core {
         std::fs::create_dir_all(data_dir).map_err(|e| format!("Could not create {}: {e}", data_dir.display()))?;
         let db = Db::open(&data_dir.join("command-center.db")).map_err(|e| format!("Could not open the database: {e}"))?;
         db::mark_orphaned_runs(&db.0.lock().unwrap()).map_err(|e| e.to_string())?;
+        let pomodoro = pomodoro::PomodoroState::load(&db);
         let (events, _) = broadcast::channel(256);
         Ok(Arc::new(Self {
             db,
             secrets,
             atera: atera::AteraState::new(data_dir),
             unifi: unifi::UnifiState::new(data_dir),
+            pomodoro,
             sign_in,
             data_dir: data_dir.to_path_buf(),
             events,
@@ -94,9 +98,10 @@ impl Core {
     }
 }
 
-/// Starts the reminder, mail, Atera, UniFi and Cursor loops. Call from inside a Tokio runtime.
+/// Starts the reminder, pomodoro, mail, Atera, UniFi and Cursor loops. Call from inside a Tokio runtime.
 pub fn start_background(core: &Arc<Core>) {
     tokio::spawn(reminder_loop(core.clone()));
+    tokio::spawn(pomodoro::tick_loop(core.clone()));
     tokio::spawn(mail::sync_loop(core.clone()));
     tokio::spawn(atera::poll_loop(core.clone()));
     tokio::spawn(unifi::poll_loop(core.clone()));
