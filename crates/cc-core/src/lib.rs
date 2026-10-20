@@ -10,6 +10,7 @@ pub mod cursor;
 pub mod db;
 pub mod mail;
 pub mod openai;
+pub mod pocket;
 pub mod pomodoro;
 pub mod providers;
 pub mod secrets;
@@ -56,6 +57,7 @@ pub struct Core {
     pub atera: atera::AteraState,
     pub unifi: unifi::UnifiState,
     pub pomodoro: pomodoro::PomodoroState,
+    pub pocket: pocket::PocketState,
     pub sign_in: SignIn,
     pub data_dir: PathBuf,
     events: broadcast::Sender<Event>,
@@ -74,6 +76,7 @@ impl Core {
             atera: atera::AteraState::new(data_dir),
             unifi: unifi::UnifiState::new(data_dir),
             pomodoro,
+            pocket: pocket::PocketState::default(),
             sign_in,
             data_dir: data_dir.to_path_buf(),
             events,
@@ -99,7 +102,7 @@ impl Core {
     }
 }
 
-/// Starts the reminder, pomodoro, mail, Atera, UniFi and Cursor loops. Call from inside a Tokio runtime.
+/// Starts the reminder, pomodoro, mail, Atera, UniFi, Cursor and Pocket loops. Call from inside a Tokio runtime.
 pub fn start_background(core: &Arc<Core>) {
     tokio::spawn(reminder_loop(core.clone()));
     tokio::spawn(pomodoro::tick_loop(core.clone()));
@@ -107,6 +110,7 @@ pub fn start_background(core: &Arc<Core>) {
     tokio::spawn(atera::poll_loop(core.clone()));
     tokio::spawn(unifi::poll_loop(core.clone()));
     tokio::spawn(cursor::poll_loop(core.clone()));
+    tokio::spawn(pocket::poll_loop(core.clone()));
 }
 
 /// Checks for due reminders every 15 seconds.

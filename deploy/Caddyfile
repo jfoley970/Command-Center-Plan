@@ -3,7 +3,9 @@
 # Two names, both on an address from your public IP block (NAT 80 and 443 to
 # this server):
 #   {$CC_PUBLIC_HOST}  the app. Every path, the API and the WebSocket included,
-#                      needs a signed-in Authentik session with MFA.
+#                      needs a signed-in Authentik session with MFA. The one
+#                      exception is /hooks/pocket, which Pocket's servers call
+#                      and cc-server checks by HMAC signature instead.
 #   {$CC_AUTH_HOST}    Authentik's sign-in pages. Its admin interface is only
 #                      served to ADMIN_RANGES (the WireGuard subnet).
 #
@@ -40,17 +42,34 @@
 	header Content-Security-Policy "default-src 'self'; connect-src 'self' wss://{$CC_PUBLIC_HOST}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://{$CC_AUTH_HOST}"
 
 	# Authentik's outpost endpoints (login redirects and callbacks).
-	reverse_proxy /outpost.goauthentik.io/* {$AUTH_OUTPOST}
+	handle /outpost.goauthentik.io/* {
+		reverse_proxy {$AUTH_OUTPOST}
+	}
+
+	# Pocket recording webhooks can't sign in. cc-server rejects any request
+	# without a valid, fresh Pocket signature, and answers 404 until a webhook
+	# secret is saved. Only this exact path skips sign-in.
+	@pocket_hook {
+		method POST
+		path /hooks/pocket
+	}
+	handle @pocket_hook {
+		request_body {
+			max_size 16MB
+		}
+		reverse_proxy cc-server:8484
+	}
 
 	# Everything else, health check, API and WebSocket included, needs a
 	# signed-in session. copy_headers also drops any X-Authentik-* header a client
 	# sends itself, so the identity cc-server sees always comes from Authentik.
-	forward_auth {$AUTH_OUTPOST} {
-		uri /outpost.goauthentik.io/auth/caddy
-		copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
+	handle {
+		forward_auth {$AUTH_OUTPOST} {
+			uri /outpost.goauthentik.io/auth/caddy
+			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
+		}
+		reverse_proxy cc-server:8484
 	}
-
-	reverse_proxy cc-server:8484
 }
 
 {$CC_AUTH_HOST} {

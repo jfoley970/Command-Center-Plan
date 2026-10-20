@@ -114,6 +114,31 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     started_at    TEXT NOT NULL,
     finished_at   TEXT
 );
+
+-- Voice commands heard on Pocket recordings. Only the words after the wake
+-- phrase are kept, never the rest of a transcript.
+CREATE TABLE IF NOT EXISTS pocket_commands (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    recording_id TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    recorded_at  TEXT,
+    heard        TEXT NOT NULL,
+    kind         TEXT NOT NULL,              -- todo | reminder | agent
+    title        TEXT NOT NULL,
+    due_at       TEXT,
+    target       TEXT NOT NULL DEFAULT '',   -- agent:<id> | provider:<id>
+    target_name  TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL,              -- pending | done | dismissed | error
+    result       TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    UNIQUE (recording_id, seq)
+);
+
+-- Pocket recordings already read, so each is read once. Ids only.
+CREATE TABLE IF NOT EXISTS pocket_seen (
+    recording_id TEXT PRIMARY KEY,
+    seen_at      TEXT NOT NULL
+);
 "#;
 
 impl Db {

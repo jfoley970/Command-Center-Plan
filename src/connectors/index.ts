@@ -4,6 +4,7 @@ import "./aiProviders";
 import "./microsoft365";
 import "./atera";
 import "./unifi";
+import "./pocket";
 import "./planned";
 
 export { allConnectors, type Connector } from "./registry";

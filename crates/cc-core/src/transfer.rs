@@ -11,8 +11,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::secrets::{self, ATERA_KEY, CLAUDE_KEY, CURSOR_KEY, OPENAI_KEY, UNIFI_KEY, XAI_KEY};
-use crate::{atera, db, unifi, Core};
+use crate::secrets::{self, ATERA_KEY, CLAUDE_KEY, CURSOR_KEY, OPENAI_KEY, POCKET_KEY, UNIFI_KEY, XAI_KEY};
+use crate::{atera, db, pocket, unifi, Core};
 
 /// A connector that can be moved, and the secret it is keyed by.
 struct Kind {
@@ -31,6 +31,7 @@ const KINDS: &[Kind] = &[
     Kind { id: "cursor", name: "Cursor", secret: Some(CURSOR_KEY) },
     Kind { id: "chatgpt", name: "ChatGPT", secret: Some(OPENAI_KEY) },
     Kind { id: "grok", name: "Grok", secret: Some(XAI_KEY) },
+    Kind { id: "pocket", name: "Pocket recorder", secret: Some(POCKET_KEY) },
 ];
 
 /// What a Command Center has set up, without any keys. Used to show which
@@ -190,6 +191,11 @@ pub async fn import(core: &Arc<Core>, bundles: Vec<ConnectorBundle>) -> Result<V
                     core.unifi.set_hidden(s, true)?;
                 }
                 unifi::refresh(core).await.map(|s| plural(s.sites.len(), "site"))
+            }
+            "pocket" => {
+                // Only recordings made from now on, so the server doesn't redo ones the desktop app already handled.
+                pocket::mark_connected(core)?;
+                pocket::refresh(core).await.map(|_| "Key saved".into())
             }
             "microsoft365" => import_mail(core, &b),
             _ => Ok(String::new()),
