@@ -1,6 +1,7 @@
 // Importing a connector module registers it. Order here is the order in Settings within each group.
 import "./claude";
 import "./aiProviders";
+import "./ollama";
 import "./microsoft365";
 import "./atera";
 import "./unifi";

@@ -9,6 +9,7 @@ pub mod commands;
 pub mod cursor;
 pub mod db;
 pub mod mail;
+pub mod ollama;
 pub mod openai;
 pub mod pocket;
 pub mod pomodoro;

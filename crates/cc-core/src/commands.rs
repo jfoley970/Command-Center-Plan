@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::secrets::CLAUDE_KEY;
-use crate::{atera, claude, cursor, db, mail, openai, pocket, pomodoro, providers, transfer, unifi, Core};
+use crate::{atera, claude, cursor, db, mail, ollama, openai, pocket, pomodoro, providers, transfer, unifi, Core};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -311,7 +311,7 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             core.changed("runs-changed");
             ok(())
         }
-        "list_providers" => ok(providers::statuses(&core.secrets)?),
+        "list_providers" => ok(providers::statuses(&core.secrets).await?),
         "set_provider_key" => {
             #[derive(Deserialize)]
             struct A {
@@ -529,11 +529,14 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) ->
     if let Some(why) = provider.unavailable {
         return Err(why.into());
     }
-    let key_name = provider.key.ok_or("This provider doesn't take a key.")?;
-    let api_key = core
-        .secrets
-        .get(key_name)?
-        .ok_or_else(|| format!("Add your {} key in Settings > Connections before running this agent.", provider.name))?;
+    let api_key = match provider.key {
+        Some(name) => core
+            .secrets
+            .get(name)?
+            .ok_or_else(|| format!("Add your {} key in Settings > Connections before running this agent.", provider.name))?,
+        None if provider.local => String::new(),
+        None => return Err("This provider doesn't take a key.".into()),
+    };
     if provider.background && input.trim().is_empty() && agent.system_prompt.trim().is_empty() {
         return Err(format!("Tell {} what to do first.", provider.name));
     }
@@ -569,6 +572,7 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) ->
     let result = match provider.id {
         "chatgpt" => openai::chatgpt(&api_key, &agent.model, &agent.system_prompt, &user).await,
         "grok" => openai::grok(&api_key, &agent.model, &agent.system_prompt, &user).await,
+        "local" => ollama::complete(&agent.model, &agent.system_prompt, &user).await,
         _ => claude::complete(&api_key, &agent.model, &agent.system_prompt, &user).await,
     };
 
