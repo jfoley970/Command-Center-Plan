@@ -148,7 +148,7 @@ reaches it, over the compose network, so it needs no key of its own.
 
 | Option | Notes |
 |---|---|
-| **Separate box** (the plan's choice) | Ubuntu Server 24.04 on its own hardware with an NVIDIA card. The command center keeps working when the ESXi host it manages is down or being patched. |
+| **Separate box** (the chosen setup: purpose-built, RTX 3070) | Ubuntu Server 24.04 on its own hardware with an NVIDIA card. The command center keeps working when the ESXi host it manages is down or being patched. |
 | **VM on the ESXi host** | Works with the card passed through to the VM: on the host, *Manage > Hardware > PCI devices*, toggle passthrough for the GPU (and its audio function) and reboot the host. Give the VM EFI firmware, reserve all of its memory, then add the GPU as a PCI device. Consumer GeForce cards may also need `hypervisor.cpuid.v0 = FALSE` in the VM's advanced settings. The GPU then belongs to that VM only. |
 | **No GPU yet** | Ollama runs on the CPU. 3–4B models answer in seconds to a minute; anything larger is slow. |
 
@@ -157,7 +157,7 @@ Plan for 8 GB of GPU memory or more. Rough guide to what fits:
 | GPU memory | Models to start with |
 |---|---|
 | none (CPU) | `llama3.2:3b`, `qwen3:4b` |
-| 8 GB | `qwen3:8b`, `llama3.1:8b` |
+| 8 GB (RTX 3070) | `qwen3:8b`, `llama3.1:8b` |
 | 16 GB | `qwen3:14b`, `gemma3:12b` |
 | 24 GB | `qwen3:30b-a3b`, `gemma3:27b` |
 
@@ -175,11 +175,12 @@ Plan for 8 GB of GPU memory or more. Rough guide to what fits:
    sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
    docker run --rm --gpus all ubuntu nvidia-smi   # should list the card
    ```
-3. **`.env`:** `COMPOSE_PROFILES=llm` starts Ollama with the stack (it is already
-   set in `.env.example`). With a GPU, also set
-   `COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml`. Then
-   `docker compose up -d`.
-4. **Pull a model:** `docker compose exec ollama ollama pull qwen3:8b`. Models
+3. **`.env`:** `COMPOSE_PROFILES=llm` starts Ollama with the stack, and
+   `COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml` gives it the GPU;
+   `.env.example` sets both. On a box without a GPU, set
+   `COMPOSE_FILE=docker-compose.yml`. Then `docker compose up -d`.
+4. **Pull a model:** `docker compose exec ollama ollama pull qwen3:8b` (about
+   5 GB, so it fits the 3070's 8 GB with room for context). Models
    live in the `ollama` volume, so allow 5–20 GB of disk per model.
    `docker compose exec ollama ollama ps` shows whether a model is on the GPU.
 5. **In the app:** *Settings > Connections > Local AI (Ollama)* lists the pulled
