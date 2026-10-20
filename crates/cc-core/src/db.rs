@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS pocket_commands (
     status       TEXT NOT NULL,              -- pending | done | dismissed | error
     result       TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL,
+    via          TEXT NOT NULL DEFAULT 'rules', -- rules | local
     UNIQUE (recording_id, seq)
 );
 

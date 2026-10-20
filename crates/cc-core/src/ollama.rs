@@ -102,6 +102,33 @@ pub async fn complete(model: &str, system: &str, user: &str) -> Result<Completio
     Ok(parse_chat(&v))
 }
 
+/// A short answer shaped by a JSON schema (Ollama's structured outputs), for
+/// background jobs such as reading voice commands. Gives up after `timeout`.
+pub async fn complete_json(model: &str, system: &str, user: &str, schema: Value, timeout: Duration) -> Result<Value, String> {
+    let model = if model.trim().is_empty() {
+        models().await?.into_iter().next().map(|m| m.0).ok_or("No local models yet. Pull one into Ollama first.")?
+    } else {
+        model.to_string()
+    };
+    let mut body = chat_body(&model, system, user);
+    body["format"] = schema;
+    body["options"] = json!({ "temperature": 0 });
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/chat", url()))
+        .timeout(timeout)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach Ollama at {}: {e}", url()))?;
+    let status = resp.status();
+    let v: Value = resp.json().await.map_err(|e| format!("Unexpected answer from Ollama: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("Ollama error {}: {}", status.as_u16(), v["error"].as_str().unwrap_or("unknown error")));
+    }
+    let text = parse_chat(&v).text;
+    serde_json::from_str(&text).map_err(|e| format!("{model} didn't answer in the expected shape: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

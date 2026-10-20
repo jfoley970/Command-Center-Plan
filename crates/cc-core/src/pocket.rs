@@ -10,6 +10,11 @@
 //! - Webhook: on the server, Pocket can POST to `/hooks/pocket` the moment a
 //!   transcript is ready. Requests are verified with Pocket's HMAC signature.
 //!
+//! Simple commands are read with fixed rules. When the rules can't tell what a
+//! command means (or when a reminder has no time they recognise), the local
+//! model in Ollama reads it instead, so the words never leave the server.
+//! Without Ollama the rules' best guess stands.
+//!
 //! Only recordings that start with the wake phrase are acted on, and only the
 //! command words are stored. Transcripts of every other recording are read,
 //! found to hold no command, and dropped; their ids are kept for 30 days so the
@@ -24,7 +29,7 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::secrets::{POCKET_KEY, POCKET_WEBHOOK_SECRET};
-use crate::{commands, db, providers, Core};
+use crate::{commands, db, ollama, providers, Core};
 
 const API_URL: &str = "https://public.heypocketai.com/api/v1/public/recordings";
 const POLL_SECS: u64 = 120;
@@ -42,6 +47,10 @@ pub const DEFAULT_WAKE: &str = "command center";
 const SET_WAKE: &str = "pocket_wake";
 const SET_AUTO: &str = "pocket_auto";
 const SET_SINCE: &str = "pocket_since";
+const SET_AI: &str = "pocket_ai";
+const SET_AI_MODEL: &str = "pocket_ai_model";
+/// How long a local model may take over one command (it may have to load first).
+const AI_TIMEOUT_SECS: u64 = 120;
 
 // ---------- Storage ----------
 
@@ -64,9 +73,11 @@ pub struct Command {
     pub status: String,
     pub result: String,
     pub created_at: String,
+    /// "rules" or "local" (the local model read it).
+    pub via: String,
 }
 
-const COLS: &str = "id, recording_id, recorded_at, heard, kind, title, due_at, target, target_name, status, result, created_at";
+const COLS: &str = "id, recording_id, recorded_at, heard, kind, title, due_at, target, target_name, status, result, created_at, via";
 
 fn from_row(r: &Row) -> rusqlite::Result<Command> {
     Ok(Command {
@@ -82,6 +93,7 @@ fn from_row(r: &Row) -> rusqlite::Result<Command> {
         status: r.get(9)?,
         result: r.get(10)?,
         created_at: r.get(11)?,
+        via: r.get(12)?,
     })
 }
 
@@ -166,7 +178,11 @@ fn setting(conn: &Connection, key: &str) -> Option<String> {
     db::get_setting(conn, key).ok().flatten().filter(|v| !v.trim().is_empty())
 }
 
-pub fn set_options(core: &Core, wake: &str, auto: Auto) -> Result<(), String> {
+fn ai_on(conn: &Connection) -> bool {
+    setting(conn, SET_AI).as_deref() != Some("off")
+}
+
+pub fn set_options(core: &Core, wake: &str, auto: Auto, ai: bool, ai_model: &str) -> Result<(), String> {
     let wake = wake.trim();
     if words(wake).is_empty() {
         return Err("The wake phrase needs at least one word.".into());
@@ -177,6 +193,8 @@ pub fn set_options(core: &Core, wake: &str, auto: Auto) -> Result<(), String> {
     let conn = core.db.0.lock().unwrap();
     db::set_setting(&conn, SET_WAKE, wake).map_err(|e| e.to_string())?;
     db::set_setting(&conn, SET_AUTO, auto.as_str()).map_err(|e| e.to_string())?;
+    db::set_setting(&conn, SET_AI, if ai { "local" } else { "off" }).map_err(|e| e.to_string())?;
+    db::set_setting(&conn, SET_AI_MODEL, ai_model.trim()).map_err(|e| e.to_string())?;
     drop(conn);
     core.changed("pocket-changed");
     Ok(())
@@ -290,6 +308,9 @@ pub struct Parsed {
     pub due_at: Option<String>,
     pub target: String,
     pub target_name: String,
+    /// False when the rules only guessed (an unrecognised command became a
+    /// todo, or a reminder has no time), so the local model should read it.
+    pub sure: bool,
 }
 
 static REMIND: LazyLock<Regex> = LazyLock::new(|| {
@@ -425,6 +446,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("grok", "grok"),
     ("cursor", "cursor"),
     ("copilot", "copilot"),
+    ("local", "local"),
+    ("ollama", "local"),
 ];
 
 /// Matches the start of a command against agent names, then provider names,
@@ -460,12 +483,13 @@ fn route(text: &str, agents: &[(i64, String)]) -> Option<(String, String, String
 /// or an agent request becomes a todo, the same as Enter in the command bar.
 pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> Parsed {
     let text = tidy(command);
-    let todo = |title: &str| Parsed {
+    let todo = |title: &str, sure: bool| Parsed {
         kind: "todo".into(),
         title: capitalize(&tidy(title)),
         due_at: None,
         target: String::new(),
         target_name: String::new(),
+        sure,
     };
 
     if let Some(m) = REMIND.find(&text) {
@@ -478,23 +502,95 @@ pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> P
             due_at: at.map(|a| a.with_timezone(&Utc).to_rfc3339()),
             target: String::new(),
             target_name: String::new(),
+            sure: at.is_some(),
         };
     }
     if let Some(c) = ADD_TO_LIST.captures(&text) {
-        return todo(c.get(1).unwrap().as_str());
+        return todo(c.get(1).unwrap().as_str(), true);
     }
     if let Some(m) = TODO.find(&text) {
         if m.end() < text.len() {
-            return todo(&text[m.end()..]);
+            return todo(&text[m.end()..], true);
         }
     }
     let asked = ASK.find(&text).map_or(text.as_str(), |m| &text[m.end()..]);
     if let Some((target, target_name, rest)) = route(asked, agents) {
         if !rest.is_empty() {
-            return Parsed { kind: "agent".into(), title: capitalize(&rest), due_at: None, target, target_name };
+            return Parsed { kind: "agent".into(), title: capitalize(&rest), due_at: None, target, target_name, sure: true };
         }
     }
-    todo(&text)
+    todo(&text, false)
+}
+
+// ---------- The local model, for commands the rules can't place ----------
+
+fn ai_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "enum": ["todo", "reminder", "agent"] },
+            "title": { "type": "string" },
+            "remind_at": { "type": "string" },
+            "agent": { "type": "string" }
+        },
+        "required": ["kind", "title", "remind_at", "agent"]
+    })
+}
+
+fn ai_prompt(agents: &[(i64, String)], now: DateTime<Local>) -> String {
+    let mut names: Vec<String> = agents.iter().map(|(_, n)| n.clone()).collect();
+    names.extend(["Claude", "ChatGPT", "Grok", "Cursor", "Local AI"].map(String::from));
+    format!(
+        "You read one spoken command James gave his personal command center app and say what it should do. \
+         Reply with JSON only.\n\
+         - kind \"reminder\": he wants to be alerted at a time. remind_at is that local time as YYYY-MM-DDTHH:MM.\n\
+         - kind \"agent\": he is asking one of these AI agents to do something: {}. agent is that name.\n\
+         - kind \"todo\": anything else he needs to do.\n\
+         title is a short task in his words, without the time or the agent's name, starting with a capital letter. \
+         Leave remind_at and agent empty when they don't apply.\n\
+         It is now {} ({}).",
+        names.join(", "),
+        now.format("%Y-%m-%dT%H:%M"),
+        now.format("%A"),
+    )
+}
+
+/// Turns the model's answer into a command, checking everything it says.
+/// None if the answer is unusable, so the rules' guess stands.
+fn from_ai(v: &Value, agents: &[(i64, String)], now: DateTime<Local>) -> Option<Parsed> {
+    let field = |k: &str| v.get(k).and_then(Value::as_str).map(str::trim).unwrap_or_default();
+    let title = capitalize(&tidy(field("title")));
+    if title.is_empty() {
+        return None;
+    }
+    let base = Parsed { kind: "todo".into(), title, due_at: None, target: String::new(), target_name: String::new(), sure: true };
+    match field("kind") {
+        "reminder" => {
+            let at = chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M:%S"))
+                .ok()
+                .and_then(|t| Local.from_local_datetime(&t).earliest())
+                .filter(|t| *t > now);
+            Some(Parsed { kind: "reminder".into(), due_at: at.map(|a| a.with_timezone(&Utc).to_rfc3339()), sure: at.is_some(), ..base })
+        }
+        "agent" => match route(field("agent"), agents) {
+            Some((target, target_name, _)) => Some(Parsed { kind: "agent".into(), target, target_name, ..base }),
+            None => Some(base),
+        },
+        _ => Some(base),
+    }
+}
+
+async fn interpret(heard: &str, agents: &[(i64, String)], now: DateTime<Local>, model: &str) -> Result<Option<Parsed>, String> {
+    let v = ollama::complete_json(
+        model,
+        &ai_prompt(agents, now),
+        heard,
+        ai_schema(),
+        std::time::Duration::from_secs(AI_TIMEOUT_SECS),
+    )
+    .await?;
+    Ok(from_ai(&v, agents, now))
 }
 
 // ---------- Acting on commands ----------
@@ -502,26 +598,47 @@ pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> P
 /// Stores the commands found in one recording and runs the ones the
 /// auto-run setting allows.
 async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String>, transcript: &str) -> Result<(), String> {
-    let (wake, auto) = {
+    let (wake, auto, ai, ai_model, agents) = {
         let conn = core.db.0.lock().unwrap();
-        (setting(&conn, SET_WAKE).unwrap_or_else(|| DEFAULT_WAKE.into()), Auto::parse(setting(&conn, SET_AUTO)))
+        let agents: Vec<(i64, String)> =
+            db::list_agents(&conn).map_err(|e| e.to_string())?.into_iter().map(|a| (a.id, a.name)).collect();
+        (
+            setting(&conn, SET_WAKE).unwrap_or_else(|| DEFAULT_WAKE.into()),
+            Auto::parse(setting(&conn, SET_AUTO)),
+            ai_on(&conn),
+            setting(&conn, SET_AI_MODEL).unwrap_or_default(),
+            agents,
+        )
     };
     let found = extract(transcript, &wake);
     if found.is_empty() {
         return Ok(());
     }
+    let now = Local::now();
+    let mut read = vec![];
+    for heard in &found {
+        let p = parse(heard, &agents, now);
+        if p.sure || !ai {
+            read.push((p, "rules"));
+            continue;
+        }
+        match interpret(heard, &agents, now, &ai_model).await {
+            Ok(Some(better)) => read.push((better, "local")),
+            Ok(None) => read.push((p, "rules")),
+            Err(e) => {
+                eprintln!("pocket: local model unavailable, using the rules: {e}");
+                read.push((p, "rules"));
+            }
+        }
+    }
     let mut to_run = vec![];
     {
         let conn = core.db.0.lock().unwrap();
-        let agents: Vec<(i64, String)> =
-            db::list_agents(&conn).map_err(|e| e.to_string())?.into_iter().map(|a| (a.id, a.name)).collect();
-        let now = Local::now();
-        for (seq, heard) in found.iter().enumerate() {
-            let p = parse(heard, &agents, now);
+        for (seq, (heard, (p, via))) in found.iter().zip(read).enumerate() {
             conn.execute(
-                "INSERT OR IGNORE INTO pocket_commands (recording_id, seq, recorded_at, heard, kind, title, due_at, target, target_name, status, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10)",
-                params![recording_id, seq as i64, recorded_at, heard, p.kind, p.title, p.due_at, p.target, p.target_name, db::now()],
+                "INSERT OR IGNORE INTO pocket_commands (recording_id, seq, recorded_at, heard, kind, title, due_at, target, target_name, status, created_at, via)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
+                params![recording_id, seq as i64, recorded_at, heard, p.kind, p.title, p.due_at, p.target, p.target_name, db::now(), via],
             )
             .map_err(|e| e.to_string())?;
             let id = conn.last_insert_rowid();
@@ -841,6 +958,10 @@ pub struct Snapshot {
     pub has_webhook_secret: bool,
     pub wake: String,
     pub auto: Auto,
+    /// Whether the local model reads commands the rules can't place.
+    pub ai: bool,
+    /// Which local model; empty means the smallest one pulled.
+    pub ai_model: String,
     /// Recordings made before this are ignored.
     pub since: Option<String>,
     pub checked_at: Option<String>,
@@ -864,6 +985,8 @@ impl PocketState {
             has_webhook_secret,
             wake: setting(&conn, SET_WAKE).unwrap_or_else(|| DEFAULT_WAKE.into()),
             auto: Auto::parse(setting(&conn, SET_AUTO)),
+            ai: ai_on(&conn),
+            ai_model: setting(&conn, SET_AI_MODEL).unwrap_or_default(),
             since: setting(&conn, SET_SINCE),
             checked_at: if has_key { checked_at } else { None },
             error: if has_key { error } else { None },
@@ -970,6 +1093,7 @@ mod tests {
             due_at: due.then(|| "2026-10-20T15:00:00Z".into()),
             target: String::new(),
             target_name: String::new(),
+            sure: true,
         };
         assert!(Auto::Tasks.runs(&p("todo", false)));
         assert!(Auto::Tasks.runs(&p("reminder", true)));
@@ -977,6 +1101,35 @@ mod tests {
         assert!(!Auto::Tasks.runs(&p("agent", false)));
         assert!(Auto::All.runs(&p("agent", false)));
         assert!(!Auto::None.runs(&p("todo", false)));
+    }
+
+    #[test]
+    fn rules_say_when_they_are_only_guessing() {
+        let now = at(10, 0);
+        assert!(parse("add a todo to renew the domain", &[], now).sure);
+        assert!(parse("remind me at 3 PM to call Dana", &[], now).sure);
+        assert!(!parse("remind me to call Dana after lunch", &[], now).sure);
+        assert!(!parse("I need to get the Ubiquiti quote over to Mike before the end of the week", &[], now).sure);
+    }
+
+    #[test]
+    fn checks_what_the_local_model_says() {
+        let now = at(10, 0);
+        let agents = vec![(1, "Daily Planner".to_string())];
+        let v = serde_json::json!({ "kind": "reminder", "title": "call Dana", "remind_at": "2026-10-20T13:00", "agent": "" });
+        let p = from_ai(&v, &agents, now).unwrap();
+        assert_eq!((p.kind.as_str(), p.title.as_str(), local(&p.due_at).as_str(), p.sure), ("reminder", "Call Dana", "20 13:00", true));
+        // A time in the past isn't trusted; the reminder waits for one.
+        let v = serde_json::json!({ "kind": "reminder", "title": "x", "remind_at": "2026-10-19T13:00", "agent": "" });
+        assert!(from_ai(&v, &agents, now).unwrap().due_at.is_none());
+        let v = serde_json::json!({ "kind": "agent", "title": "Plan my afternoon", "remind_at": "", "agent": "daily planner" });
+        assert_eq!(from_ai(&v, &agents, now).unwrap().target, "agent:1");
+        let v = serde_json::json!({ "kind": "agent", "title": "Fix the bug", "remind_at": "", "agent": "Local AI" });
+        assert_eq!(from_ai(&v, &agents, now).unwrap().target, "provider:local");
+        // An agent that doesn't exist becomes a todo; an empty title is no answer at all.
+        let v = serde_json::json!({ "kind": "agent", "title": "Do it", "remind_at": "", "agent": "Jarvis" });
+        assert_eq!(from_ai(&v, &agents, now).unwrap().kind, "todo");
+        assert!(from_ai(&serde_json::json!({ "kind": "todo", "title": " " }), &agents, now).is_none());
     }
 
     #[test]

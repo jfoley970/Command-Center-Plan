@@ -18,6 +18,8 @@ export type PocketCommand = {
   status: "pending" | "done" | "dismissed" | "error";
   result: string;
   created_at: string;
+  /** "local" when the local model worked out what the command meant. */
+  via: "rules" | "local";
 };
 
 export type PocketSnapshot = {
@@ -25,6 +27,10 @@ export type PocketSnapshot = {
   has_webhook_secret: boolean;
   wake: string;
   auto: PocketAuto;
+  /** The local model reads commands the simple rules can't place. */
+  ai: boolean;
+  /** Empty means the smallest model pulled into Ollama. */
+  ai_model: string;
   since: string | null;
   checked_at: string | null;
   error: string | null;
@@ -38,7 +44,7 @@ export const pocket = {
   refresh: () => call<PocketSnapshot>("pocket_refresh"),
   setKey: (key: string) => call<PocketSnapshot>("pocket_set_key", { key }),
   setWebhookSecret: (key: string) => call<PocketSnapshot>("pocket_set_webhook_secret", { key }),
-  setOptions: (wake: string, auto: PocketAuto) => call<PocketSnapshot>("pocket_set_options", { wake, auto }),
+  setOptions: (o: { wake: string; auto: PocketAuto; ai: boolean; aiModel: string }) => call<PocketSnapshot>("pocket_set_options", o),
   run: (id: number, edit?: PocketEdit) => call<PocketCommand>("pocket_run", { id, edit }),
   dismiss: (id: number) => call<void>("pocket_dismiss", { id }),
 };

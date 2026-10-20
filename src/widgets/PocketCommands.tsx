@@ -81,6 +81,7 @@ export default function PocketCommands() {
               {done.map((c) => (
                 <li key={c.id} title={`Heard: “${c.heard}”`}>
                   <span className={`tag kind-${c.kind}`}>{KIND_LABEL[c.kind]}</span>
+                  {c.via === "local" && <span className="tag" title="The local AI worked out what this meant">Local AI</span>}
                   <span className="grow truncate">{c.result || c.title}</span>
                   <span className="muted small nowrap">{ago(c.created_at)}</span>
                 </li>
@@ -127,6 +128,7 @@ function PendingRow({ c, onDone }: { c: PocketCommand; onDone: () => void }) {
         <p className="muted small">
           {c.status === "error" && <span className="pocket-failed">{c.result} </span>}
           Heard “{c.heard}”{c.recorded_at && ` · ${formatWhen(c.recorded_at)}`}
+          {c.via === "local" && " · read by Local AI"}
         </p>
       </div>
       <div className="row">
@@ -142,6 +144,10 @@ function PendingRow({ c, onDone }: { c: PocketCommand; onDone: () => void }) {
 /** Key, wake phrase, auto-run and (on the server) webhook. Shared with Settings > Connections. */
 export function PocketSetup() {
   const { snap, reload } = usePocket();
+  const { providers } = useData();
+  const local = providers.find((p) => p.id === "local");
+  const [ai, setAi] = useState(true);
+  const [aiModel, setAiModel] = useState("");
   const [key, setKey] = useState("");
   const [secret, setSecret] = useState("");
   const [wake, setWake] = useState("");
@@ -153,8 +159,10 @@ export function PocketSetup() {
     if (snap) {
       setWake((w) => w || snap.wake);
       setAuto(snap.auto);
+      setAi(snap.ai);
+      setAiModel(snap.ai_model);
     }
-  }, [snap?.wake, snap?.auto]);
+  }, [snap?.wake, snap?.auto, snap?.ai, snap?.ai_model]);
 
   async function run(fn: () => Promise<unknown>) {
     setErr(null);
@@ -181,7 +189,7 @@ export function PocketSetup() {
 
   async function saveOptions(e: FormEvent) {
     e.preventDefault();
-    if (await run(() => pocket.setOptions(wake, auto))) {
+    if (await run(() => pocket.setOptions({ wake, auto, ai, aiModel }))) {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     }
@@ -222,12 +230,32 @@ export function PocketSetup() {
             ))}
           </select>
         </label>
+        <label className="grow">
+          Unclear commands
+          <select value={ai ? aiModel || "*" : "off"} onChange={(e) => {
+            const v = e.target.value;
+            setAi(v !== "off");
+            setAiModel(v === "off" || v === "*" ? "" : v);
+          }}>
+            <option value="*">Local AI reads them (smallest model)</option>
+            {local?.models.map((m) => (
+              <option key={m.id} value={m.id}>Local AI reads them with {m.label}</option>
+            ))}
+            {aiModel && !local?.models.some((m) => m.id === aiModel) && <option value={aiModel}>Local AI reads them with {aiModel}</option>}
+            <option value="off">Best guess from the rules only</option>
+          </select>
+        </label>
         <button type="submit" disabled={!wake.trim()}>{saved ? "Saved" : "Save"}</button>
       </form>
+      {ai && local && !local.connected && (
+        <p className="muted small">Local AI isn't reachable right now ({local.note ?? "no models"}), so unclear commands use the rules' best guess until it is.</p>
+      )}
       <p className="muted small">
         Start a recording with the wake phrase, then say what you want: “add a todo to renew the domain”, “remind me at 3 PM
         to call Dana”, “Cursor, fix the login bug” or an agent's name. Say the wake phrase again for another command in
-        the same recording. Recordings that don't start with it are ignored and nothing from them is kept.
+        the same recording. When the simple rules can't tell what you meant, the local AI on the server reads the command
+        instead, so it never leaves your server. Recordings that don't start with the wake phrase are ignored and nothing
+        from them is kept.
       </p>
 
       {onServer && (

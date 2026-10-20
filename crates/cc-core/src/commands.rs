@@ -394,12 +394,16 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
         }
         "pocket_set_options" => {
             #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
             struct A {
                 wake: String,
                 auto: pocket::Auto,
+                ai: bool,
+                #[serde(default)]
+                ai_model: String,
             }
-            let A { wake, auto } = args(a)?;
-            pocket::set_options(core, &wake, auto)?;
+            let A { wake, auto, ai, ai_model } = args(a)?;
+            pocket::set_options(core, &wake, auto, ai, &ai_model)?;
             ok(core.pocket.snapshot(core)?)
         }
         "pocket_run" => {
