@@ -38,6 +38,8 @@ services:
       # Caddy sets this after the auth service signs you in and strips it from client requests.
       CC_AUTH_HEADER: X-Authentik-Username
       CC_SECRET_KEY_FILE: /run/secrets/cc-secret-key
+      # Local AI. Harmless when Ollama isn't running: the Local AI card says so.
+      CC_OLLAMA_URL: http://ollama:11434
       TZ: ${TZ}
     secrets:
       - cc-secret-key
@@ -47,23 +49,23 @@ services:
     expose:
       - "8484"
 
-  # Local models. Needs the NVIDIA container toolkit on the host; start with
-  # `docker compose --profile llm up -d` once the GPU is in.
+  # Local models for the Local AI provider. Turn on with COMPOSE_PROFILES=llm in
+  # .env; add docker-compose.gpu.yml to COMPOSE_FILE once the NVIDIA driver and
+  # container toolkit are on the host. Never published and not in the
+  # Caddyfile: only cc-server talks to it, over the compose network.
   ollama:
     image: ollama/ollama
     profiles: ["llm"]
     restart: unless-stopped
+    environment:
+      # Keep a model loaded for 30 minutes after use so the next ask is quick.
+      OLLAMA_KEEP_ALIVE: 30m
+      # One model in memory at a time; an 8 GB card can't hold two 8B models.
+      OLLAMA_MAX_LOADED_MODELS: 1
     volumes:
       - ollama:/root/.ollama
     expose:
       - "11434"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
 secrets:
   cc-secret-key:

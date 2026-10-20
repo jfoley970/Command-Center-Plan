@@ -35,7 +35,8 @@ Nothing else. In particular:
 ## Try it on a Linux VM
 
 Ubuntu Server 24.04 with 4 vCPU, 8 GB RAM and 60 GB of disk is enough until the
-GPU box exists. Install Docker (`curl -fsSL https://get.docker.com | sh`).
+GPU box exists (add 16 GB of RAM and 50 GB of disk if you run local models on the
+CPU; see *Local AI* below). Install Docker (`curl -fsSL https://get.docker.com | sh`).
 
 1. **Names.** Pick an address on your public IP block and NAT TCP 80 and 443 on it
    to the server's LAN address (`PUBLIC_ADDRESS`). In public DNS, point
@@ -136,12 +137,63 @@ Connectors move from the app. For the rest of the data, copy
 the server is stopped and before you first use it, since this replaces the
 server's data.
 
-## Local models
+## Local AI (Ollama)
 
-Once the GPU is in, install the NVIDIA driver and the NVIDIA container toolkit,
-then `docker compose --profile llm up -d` starts Ollama next to the server. The
-plan assumes at least 8 GB of VRAM: 7–8B models for triage and summaries, and
-Whisper for voice. Wiring agents to pick Claude or a local model is the next step.
+Ollama runs next to cc-server and gives the app a **Local AI** provider: make an
+agent with it, or type `local: …` in the ask box. Prompts and answers never leave
+the server. Ollama is not published and not in the Caddyfile; only cc-server
+reaches it, over the compose network, so it needs no key of its own.
+
+### Where it runs
+
+| Option | Notes |
+|---|---|
+| **Separate box** (the chosen setup: purpose-built, RTX 3070) | Ubuntu Server 24.04 on its own hardware with an NVIDIA card. The command center keeps working when the ESXi host it manages is down or being patched. |
+| **VM on the ESXi host** | Works with the card passed through to the VM: on the host, *Manage > Hardware > PCI devices*, toggle passthrough for the GPU (and its audio function) and reboot the host. Give the VM EFI firmware, reserve all of its memory, then add the GPU as a PCI device. Consumer GeForce cards may also need `hypervisor.cpuid.v0 = FALSE` in the VM's advanced settings. The GPU then belongs to that VM only. |
+| **No GPU yet** | Ollama runs on the CPU. 3–4B models answer in seconds to a minute; anything larger is slow. |
+
+Plan for 8 GB of GPU memory or more. Rough guide to what fits:
+
+| GPU memory | Models to start with |
+|---|---|
+| none (CPU) | `llama3.2:3b`, `qwen3:4b` |
+| 8 GB (RTX 3070) | `qwen3:8b`, `llama3.1:8b` |
+| 16 GB | `qwen3:14b`, `gemma3:12b` |
+| 24 GB | `qwen3:30b-a3b`, `gemma3:27b` |
+
+### Turn it on
+
+1. **GPU driver** (skip on CPU). On Ubuntu 24.04: `sudo ubuntu-drivers install`,
+   reboot, and check `nvidia-smi` lists the card.
+2. **NVIDIA container toolkit** (skip on CPU), so containers can use the card:
+   ```bash
+   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+   curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+     | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#' \
+     | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+   sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+   sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+   docker run --rm --gpus all ubuntu nvidia-smi   # should list the card
+   ```
+3. **`.env`:** `COMPOSE_PROFILES=llm` starts Ollama with the stack, and
+   `COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml` gives it the GPU;
+   `.env.example` sets both. On a box without a GPU, set
+   `COMPOSE_FILE=docker-compose.yml`. Then `docker compose up -d`.
+4. **Pull a model:** `docker compose exec ollama ollama pull qwen3:8b` (about
+   5 GB, so it fits the 3070's 8 GB with room for context). Models
+   live in the `ollama` volume, so allow 5–20 GB of disk per model.
+   `docker compose exec ollama ollama ps` shows whether a model is on the GPU.
+5. **In the app:** *Settings > Connections > Local AI (Ollama)* lists the pulled
+   models. Pick one in an agent's model list, or use `local: …` from the ask box,
+   which uses the smallest pulled model.
+
+Ollama keeps a model loaded for 30 minutes after use and holds one at a time
+(`OLLAMA_KEEP_ALIVE` and `OLLAMA_MAX_LOADED_MODELS` in `docker-compose.yml`), so
+the first ask after a quiet spell waits while the model loads. The desktop app
+in local mode uses Ollama on that computer (`http://127.0.0.1:11434`) if one is
+running; set `CC_OLLAMA_URL` to point either app elsewhere.
+
+Whisper for voice is still to come; it will sit next to Ollama the same way.
 
 ## Settings reference (`cc-server`)
 
@@ -153,4 +205,5 @@ Whisper for voice. Wiring agents to pick Claude or a local model is the next ste
 | `CC_DATA_DIR` | `./data` | Database, encrypted secrets, hidden-site lists. |
 | `CC_WEB_DIR` | `./dist` | The built frontend. |
 | `CC_SECRET_KEY_FILE` | unset | 32-byte key (hex, base64 or raw). systemd `LoadCredential=cc-secret-key` also works. |
+| `CC_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama for the Local AI provider. Compose sets `http://ollama:11434`. |
 | `TZ` | host | Time zone for reminders and agent context. |
