@@ -26,6 +26,11 @@ Nothing else. In particular:
   `/api/events` WebSocket and `/api/health`. cc-server is never published; it
   also refuses cross-site browser requests and any request without the identity
   header Caddy sets after sign-in.
+- **The one exception is `POST /hooks/pocket`**, where Pocket delivers
+  recording events. Pocket can't sign in, so cc-server checks each request's
+  HMAC signature (`X-HeyPocket-Signature` over the timestamp and body, rejected
+  if older than five minutes) and answers 404 until you save a webhook secret in
+  Settings > Connections > Pocket recorder.
 - **Authentik's admin UI** (`/if/admin/`) answers only from `ADMIN_RANGES` (the
   WireGuard subnet). Sign-in pages stay public because sign-in needs them.
 - **SSH** listens only on the WireGuard address.

@@ -16,6 +16,7 @@ import Trend from "../widgets/Trend";
 import Integrations from "../widgets/Integrations";
 import AteraAlerts from "../widgets/AteraAlerts";
 import UnifiFleet from "../widgets/UnifiFleet";
+import PocketCommands from "../widgets/PocketCommands";
 
 const LAYOUT_KEY = "cc.dashboard.layout.v2";
 
@@ -27,8 +28,9 @@ const DEFAULT_LAYOUT: Layout = [
   { i: "agent", x: 8, y: 6, w: 4, h: 9, minH: 5, minW: 3 },
   { i: "trend", x: 0, y: 15, w: 4, h: 6, minH: 5, minW: 3 },
   { i: "connections", x: 4, y: 15, w: 8, h: 6, minH: 4, minW: 3 },
-  { i: "atera", x: 0, y: 21, w: 12, h: 8, minH: 4, minW: 4 },
-  { i: "unifi", x: 0, y: 29, w: 12, h: 8, minH: 4, minW: 4 },
+  { i: "pocket", x: 0, y: 21, w: 12, h: 6, minH: 4, minW: 4 },
+  { i: "atera", x: 0, y: 27, w: 12, h: 8, minH: 4, minW: 4 },
+  { i: "unifi", x: 0, y: 35, w: 12, h: 8, minH: 4, minW: 4 },
 ];
 
 type Saved = Pick<Layout[number], "i" | "x" | "y" | "w" | "h">[];
@@ -206,6 +208,7 @@ export default function Dashboard({ go }: { go: (p: Page) => void }) {
               <AgentConsole agentId={agentId} setAgentId={setAgentId} onOpenAgents={() => go("agents")} onOpenSettings={() => go("settings")} />
             </div>
             <div key="trend"><Trend /></div>
+            <div key="pocket"><PocketCommands /></div>
             <div key="atera"><AteraAlerts /></div>
             <div key="unifi"><UnifiFleet /></div>
             <div key="connections"><Integrations onOpenInbox={() => go("inbox")} /></div>
