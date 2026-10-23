@@ -183,6 +183,7 @@ export const api = {
   getMailSetup: () => call<{ client_id: string; tenant_id: string }>("get_mail_setup"),
   connectMicrosoft: (clientId: string, tenantId: string) =>
     call<MailAccount>("connect_microsoft", { clientId, tenantId }),
+  mailSignInPrompt: () => call<{ user_code: string; verification_uri: string } | null>("mail_sign_in_prompt"),
   listMailAccounts: () => call<MailAccount[]>("list_mail_accounts"),
   listEmails: (accountId: number) => call<Email[]>("list_emails", { accountId }),
   syncMail: (accountId: number) => call<number>("sync_mail", { accountId }),
