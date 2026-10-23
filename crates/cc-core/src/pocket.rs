@@ -581,6 +581,11 @@ fn from_ai(v: &Value, agents: &[(i64, String)], now: DateTime<Local>) -> Option<
     }
 }
 
+/// Late tonight, so a todo with no date of its own sits on the dashboard's Today tab.
+fn end_of_today() -> String {
+    local_at(Local::now().date_naive(), 23, 59).map_or_else(|| Utc::now().to_rfc3339(), |t| t.with_timezone(&Utc).to_rfc3339())
+}
+
 async fn interpret(heard: &str, agents: &[(i64, String)], now: DateTime<Local>, model: &str) -> Result<Option<Parsed>, String> {
     let v = ollama::complete_json(
         model,
@@ -743,7 +748,7 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
             };
             db::add_todo(
                 &core.db.0.lock().unwrap(),
-                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: None, project_id: None },
+                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: c.due_at.clone().or_else(|| Some(end_of_today())), project_id: None },
             )
             .map(|t| format!("Todo added: {}", t.title))
             .map_err(|e| e.to_string())
