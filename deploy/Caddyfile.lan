@@ -7,6 +7,9 @@
 # here is reachable from the internet: Compose binds Caddy to LAN_ADDRESS, and
 # your edge forwards no ports to it.
 {
+	# Clients send no SNI when they connect to a bare IP, so tell Caddy which
+	# certificate to use; without this the TLS handshake fails.
+	default_sni {$LAN_ADDRESS}
 	servers {
 		protocols h1 h2
 	}
