@@ -1,0 +1,15 @@
+# LAN only: Caddy with a password and its own certificate, on LAN_ADDRESS, in
+# place of the public setup (Authentik, Let's Encrypt, the NAT). Turn on in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml:docker-compose.lan.yml
+# Remove it from COMPOSE_FILE when you move to the public setup.
+services:
+  caddy:
+    ports: !override
+      - "${LAN_ADDRESS:?set LAN_ADDRESS in .env}:443:443"
+    environment: !override
+      LAN_ADDRESS: ${LAN_ADDRESS}
+      LAN_USER: ${LAN_USER:?set LAN_USER in .env}
+      LAN_PASSWORD_HASH: ${LAN_PASSWORD_HASH:?set LAN_PASSWORD_HASH in .env}
+    volumes: !override
+      - ./Caddyfile.lan:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data

@@ -78,6 +78,34 @@ CPU; see *Local AI* below). Install Docker (`curl -fsSL https://get.docker.com |
 Keep `secrets/cc-secret-key` out of the backups of the `cc-data` volume: the key
 and the encrypted `secrets.enc` together unlock every stored API key.
 
+## LAN only (before the public setup)
+
+To use the app on your own network before picking public names and setting up
+Authentik, run Caddy with a password prompt and its own certificate on the
+server's LAN address. Nothing is forwarded from the internet.
+
+1. In `.env`, set `LAN_ADDRESS` (the server's LAN address), `LAN_USER`, and
+   `COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml:docker-compose.lan.yml`.
+   The public settings can keep their placeholder values.
+2. Set the password, which Caddy stores only as a hash:
+   ```bash
+   read -rsp "Password: " P; echo
+   echo "LAN_PASSWORD_HASH='$(docker run --rm caddy:2 caddy hash-password --plaintext "$P")'" >> .env; unset P
+   ```
+3. Create the secret key (step 4 of *Try it on a Linux VM*) and start it:
+   `docker compose up -d --build`.
+4. Open `https://<LAN_ADDRESS>`. The browser warns about the certificate until
+   you trust Caddy's root: copy it out with
+   `docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt .` and
+   import it as a trusted root on each computer (on Windows, into *Trusted Root
+   Certification Authorities*). Then sign in with `LAN_USER` and the password.
+
+Every path, the API and WebSocket included, needs the password; Caddy then sets
+the identity header cc-server trusts and drops any copy a client sends. The
+desktop app's server mode needs Caddy's root trusted on that computer. To move
+to the public setup later, drop `docker-compose.lan.yml` from `COMPOSE_FILE` and
+follow the steps above; your data stays in the `cc-data` volume.
+
 ## Keeping it safe once it's up
 
 - **Patch:** `docker compose pull && docker compose up -d --build` for Caddy and
