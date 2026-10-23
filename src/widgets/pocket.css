@@ -1,0 +1,8 @@
+/* Pocket voice commands widget. */
+.pocket-hint { margin: 0 0 0.4rem; }
+.pocket-list + .pocket-list { margin-top: 0.5rem; border-top: 1px solid var(--border); padding-top: 0.3rem; }
+.pocket-list .tag.kind-reminder { color: var(--warning); }
+.pocket-list .tag.kind-agent { color: var(--accent); }
+.pocket-failed { color: var(--critical); }
+.pocket-setup label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--text-2); min-width: 180px; }
+.pocket-setup code { font-size: 0.78rem; word-break: break-all; }

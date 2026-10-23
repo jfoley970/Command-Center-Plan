@@ -13,15 +13,20 @@
 //! - Browser requests from another site are refused (their `Origin` must
 //!   match the `Host` they were sent to), on the API and the WebSocket alike.
 //!
+//! `POST /hooks/pocket` is the one route without sign-in: Pocket's servers call
+//! it, and each request must carry a valid Pocket HMAC signature instead. It is
+//! off until a webhook secret is saved in the Pocket connector.
+//!
 //! Other settings: `CC_BIND` (default 127.0.0.1:8484), `CC_DATA_DIR` (default
 //! ./data), `CC_WEB_DIR` (the built frontend, default ./dist), and
 //! `CC_SECRET_KEY_FILE` (32-byte key for the secret store; systemd's
 //! `LoadCredential=cc-secret-key` is picked up automatically).
 
 use axum::{
+    body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Request, State,
+        DefaultBodyLimit, Path, Request, State,
     },
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -81,8 +86,11 @@ fn router(core: Arc<Core>, auth: Auth, web_dir: &FsPath) -> Router {
         .route("/events", get(events))
         .layer(middleware::from_fn_with_state(auth, require_auth))
         .route("/health", get(|| async { "ok" }));
+    // Webhooks prove who they are with a signature, not a sign-in. A long
+    // recording's transcript can be a few megabytes.
+    let hooks = Router::new().route("/pocket", post(pocket_hook)).layer(DefaultBodyLimit::max(16 * 1024 * 1024));
     let spa = ServeDir::new(web_dir).fallback(ServeFile::new(web_dir.join("index.html")));
-    Router::new().nest("/api", api).fallback_service(spa).with_state(AppState { core })
+    Router::new().nest("/api", api).nest("/hooks", hooks).fallback_service(spa).with_state(AppState { core })
 }
 
 async fn require_auth(State(auth): State<Auth>, req: Request, next: Next) -> Response {
@@ -135,6 +143,18 @@ async fn call(State(s): State<AppState>, Path(command): Path<String>, headers: H
     match cc_core::call(&s.core, &command, args).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// `POST /hooks/pocket`: a recording event from Pocket.
+async fn pocket_hook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let (ts, sig) = (header("x-heypocket-timestamp"), header("x-heypocket-signature"));
+    match cc_core::pocket::webhook(&s.core, ts, sig, &body) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(cc_core::pocket::HookError::Disabled) => StatusCode::NOT_FOUND.into_response(),
+        Err(cc_core::pocket::HookError::BadSignature) => (StatusCode::UNAUTHORIZED, "Bad signature.").into_response(),
+        Err(cc_core::pocket::HookError::BadBody(e)) => (StatusCode::BAD_REQUEST, format!("Bad JSON: {e}")).into_response(),
     }
 }
 
@@ -303,5 +323,50 @@ mod tests {
         let health = axum::http::Request::get("/api/health").body(Body::empty()).unwrap();
         assert_eq!(app.oneshot(health).await.unwrap().status(), StatusCode::OK);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pocket_hook_needs_a_secret_and_a_valid_signature() {
+        let dir = std::env::temp_dir().join(format!("cc-server-{}-{}", std::process::id(), rand_suffix()));
+        let core = Core::open(&dir, Secrets::new(cc_core::secrets::MemoryStore::default()), SignIn::DeviceCode).unwrap();
+        // Sign-in is on, but Pocket can't sign in; the signature is what counts.
+        let app = router(core.clone(), Auth { header: Some("X-Authentik-Username".into()), token: None }, &dir);
+        let body = r#"{"event":"summary.completed","recording":{"id":"r1","recordingAt":"2099-01-01T00:00:00Z"},"transcript":[{"text":"Command center, todo test the hook"}]}"#;
+        let hook = |ts: String, sig: &str| {
+            post("/hooks/pocket")
+                .header("X-HeyPocket-Timestamp", ts)
+                .header("X-HeyPocket-Signature", sig)
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().to_string();
+        assert_eq!(app.clone().oneshot(hook(now.clone(), "00")).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+        cc_core::call(&core, "pocket_set_webhook_secret", json!({ "key": "whsec_test" })).await.unwrap();
+        assert_eq!(app.clone().oneshot(hook(now.clone(), "00")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let sig = hmac_hex("whsec_test", &format!("{now}.{body}"));
+        assert_eq!(app.oneshot(hook(now, &sig)).await.unwrap().status(), StatusCode::NO_CONTENT);
+
+        // The todo is added in the background.
+        for _ in 0..50 {
+            let todos = cc_core::call(&core, "list_todos", Value::Null).await.unwrap();
+            if todos.as_array().unwrap().iter().any(|t| t["title"] == "Test the hook") {
+                std::fs::remove_dir_all(dir).unwrap();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the webhook's todo never appeared");
+    }
+
+    fn hmac_hex(key: &str, msg: &str) -> String {
+        // Same construction as cc-core's; written out so the test doesn't trust it.
+        use sha2::{Digest, Sha256};
+        let mut k = [0u8; 64];
+        k[..key.len()].copy_from_slice(key.as_bytes());
+        let ipad: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+        let opad: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+        let inner = Sha256::new().chain_update(&ipad).chain_update(msg).finalize();
+        Sha256::new().chain_update(&opad).chain_update(inner).finalize().iter().map(|b| format!("{b:02x}")).collect()
     }
 }

@@ -90,6 +90,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
       listen("mail-changed", () => refresh()),
       listen("connectors-changed", () => refresh()),
       listen("providers-changed", () => refresh()),
+      // Voice commands add todos and start agent runs from the backend.
+      listen("pocket-changed", () => refresh()),
     ]);
     // Keeps relative labels like "overdue" current.
     const timer = setInterval(refresh, 60_000);
