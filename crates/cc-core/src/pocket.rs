@@ -642,6 +642,12 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
             }
         }
     }
+    // A reminder with no time can't fire, so it goes on the todo list instead
+    // of waiting in the Pocket widget.
+    let read: Vec<(Parsed, &str)> = read
+        .into_iter()
+        .map(|(p, via)| if p.kind == "reminder" && p.due_at.is_none() { (Parsed { kind: "todo".into(), ..p }, via) } else { (p, via) })
+        .collect();
     let mut to_run = vec![];
     {
         let conn = core.db.0.lock().unwrap();
@@ -656,8 +662,7 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
             if auto.runs(&p) {
                 to_run.push(id);
             } else {
-                let why = if p.kind == "reminder" && p.due_at.is_none() { " (needs a time)" } else { "" };
-                core.notify("Pocket command to review", format!("{}{why}", describe(&p.kind, &p.title, &p.target_name)));
+                core.notify("Pocket command to review", describe(&p.kind, &p.title, &p.target_name));
             }
         }
     }
