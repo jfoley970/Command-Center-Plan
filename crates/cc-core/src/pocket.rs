@@ -586,10 +586,26 @@ fn from_ai(v: &Value, agents: &[(i64, String)], now: DateTime<Local>) -> Option<
     }
 }
 
-/// Late tonight, so a todo with no date of its own sits on the dashboard's Today tab.
-fn end_of_today() -> String {
-    let today = Local::now().date_naive();
-    local_at(today, 23, 59).map_or_else(|| Utc::now().to_rfc3339(), |t| t.with_timezone(&Utc).to_rfc3339())
+/// When the business day closes.
+const CLOSE_HOUR: u32 = 16;
+
+/// The default due time for a todo or reminder that names no time of its own
+/// (James, 2026-10-23): close of business, 4 PM, today if it's a weekday before
+/// 4, else the next weekday at 4.
+fn business_close(now: DateTime<Local>) -> DateTime<Local> {
+    use chrono::{Datelike, Weekday};
+    let mut day = now.date_naive();
+    loop {
+        let weekday = !matches!(day.weekday(), Weekday::Sat | Weekday::Sun);
+        if let Some(close) = local_at(day, CLOSE_HOUR, 0).filter(|c| weekday && *c > now) {
+            return close;
+        }
+        day = day.succ_opt().unwrap_or(day);
+    }
+}
+
+fn business_close_utc() -> String {
+    business_close(Local::now()).with_timezone(&Utc).to_rfc3339()
 }
 
 async fn interpret(heard: &str, agents: &[(i64, String)], now: DateTime<Local>, model: &str) -> Result<Option<Parsed>, String> {
@@ -642,11 +658,14 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
             }
         }
     }
-    // A reminder with no time can't fire, so it goes on the todo list instead
-    // of waiting in the Pocket widget.
+    // A reminder with no time goes off at close of business instead of
+    // waiting in the Pocket widget for one.
     let read: Vec<(Parsed, &str)> = read
         .into_iter()
-        .map(|(p, via)| if p.kind == "reminder" && p.due_at.is_none() { (Parsed { kind: "todo".into(), ..p }, via) } else { (p, via) })
+        .map(|(p, via)| match p.kind.as_str() {
+            "reminder" if p.due_at.is_none() => (Parsed { due_at: Some(business_close_utc()), ..p }, via),
+            _ => (p, via),
+        })
         .collect();
     let mut to_run = vec![];
     {
@@ -754,7 +773,7 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
             };
             db::add_todo(
                 &core.db.0.lock().unwrap(),
-                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: c.due_at.clone().or_else(|| Some(end_of_today())), project_id: None },
+                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: c.due_at.clone().or_else(|| Some(business_close_utc())), project_id: None },
             )
             .map(|t| format!("Todo added: {}", t.title))
             .map_err(|e| e.to_string())
@@ -1151,6 +1170,19 @@ mod tests {
         let v = serde_json::json!({ "kind": "agent", "title": "Do it", "remind_at": "", "agent": "Jarvis" });
         assert_eq!(from_ai(&v, &agents, now).unwrap().kind, "todo");
         assert!(from_ai(&serde_json::json!({ "kind": "todo", "title": " " }), &agents, now).is_none());
+    }
+
+    #[test]
+    fn undated_items_are_due_at_close_of_business() {
+        let on = |d: u32, h: u32| {
+            Local.from_local_datetime(&chrono::NaiveDate::from_ymd_opt(2026, 10, d).unwrap().and_hms_opt(h, 30, 0).unwrap()).unwrap()
+        };
+        let close = |t| business_close(t).format("%a %d %H:%M").to_string();
+        // 2026-10-20 is a Tuesday.
+        assert_eq!(close(on(20, 9)), "Tue 20 16:00");
+        assert_eq!(close(on(20, 16)), "Wed 21 16:00");
+        assert_eq!(close(on(23, 17)), "Mon 26 16:00");
+        assert_eq!(close(on(24, 10)), "Mon 26 16:00");
     }
 
     #[test]
