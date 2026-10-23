@@ -483,13 +483,19 @@ fn route(text: &str, agents: &[(i64, String)]) -> Option<(String, String, String
 /// or an agent request becomes a todo, the same as Enter in the command bar.
 pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> Parsed {
     let text = tidy(command);
-    let todo = |title: &str, sure: bool| Parsed {
-        kind: "todo".into(),
-        title: capitalize(&tidy(title)),
-        due_at: None,
-        target: String::new(),
-        target_name: String::new(),
-        sure,
+    // "add a todo to call Bob tomorrow" is due tomorrow. Unclear commands keep
+    // their words as they are; the local model may find a date in them.
+    let todo = |title: &str, sure: bool| {
+        let (due, title) = if sure { when(title, now) } else { (None, title.to_string()) };
+        let title = tidy(&title);
+        Parsed {
+            kind: "todo".into(),
+            title: capitalize(tidy(title.strip_prefix("to ").unwrap_or(&title)).as_str()),
+            due_at: due.map(|a| a.with_timezone(&Utc).to_rfc3339()),
+            target: String::new(),
+            target_name: String::new(),
+            sure,
+        }
     };
 
     if let Some(m) = REMIND.find(&text) {
@@ -545,7 +551,7 @@ fn ai_prompt(agents: &[(i64, String)], now: DateTime<Local>) -> String {
          Reply with JSON only.\n\
          - kind \"reminder\": he wants to be alerted at a time. remind_at is that local time as YYYY-MM-DDTHH:MM.\n\
          - kind \"agent\": he is asking one of these AI agents to do something: {}. agent is that name.\n\
-         - kind \"todo\": anything else he needs to do.\n\
+         - kind \"todo\": anything else he needs to do. If he says when it is due, remind_at is that local time.\n\
          title is a short task in his words, without the time or the agent's name, starting with a capital letter. \
          Leave remind_at and agent empty when they don't apply.\n\
          It is now {} ({}).",
@@ -563,22 +569,27 @@ fn from_ai(v: &Value, agents: &[(i64, String)], now: DateTime<Local>) -> Option<
     if title.is_empty() {
         return None;
     }
+    let at = chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M:%S"))
+        .ok()
+        .and_then(|t| Local.from_local_datetime(&t).earliest())
+        .filter(|t| *t > now)
+        .map(|a| a.with_timezone(&Utc).to_rfc3339());
     let base = Parsed { kind: "todo".into(), title, due_at: None, target: String::new(), target_name: String::new(), sure: true };
     match field("kind") {
-        "reminder" => {
-            let at = chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M")
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M:%S"))
-                .ok()
-                .and_then(|t| Local.from_local_datetime(&t).earliest())
-                .filter(|t| *t > now);
-            Some(Parsed { kind: "reminder".into(), due_at: at.map(|a| a.with_timezone(&Utc).to_rfc3339()), sure: at.is_some(), ..base })
-        }
+        "reminder" => Some(Parsed { kind: "reminder".into(), sure: at.is_some(), due_at: at, ..base }),
         "agent" => match route(field("agent"), agents) {
             Some((target, target_name, _)) => Some(Parsed { kind: "agent".into(), target, target_name, ..base }),
             None => Some(base),
         },
-        _ => Some(base),
+        _ => Some(Parsed { due_at: at, ..base }),
     }
+}
+
+/// Late tonight, so a todo with no date of its own sits on the dashboard's Today tab.
+fn end_of_today() -> String {
+    let today = Local::now().date_naive();
+    local_at(today, 23, 59).map_or_else(|| Utc::now().to_rfc3339(), |t| t.with_timezone(&Utc).to_rfc3339())
 }
 
 async fn interpret(heard: &str, agents: &[(i64, String)], now: DateTime<Local>, model: &str) -> Result<Option<Parsed>, String> {
@@ -738,7 +749,7 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
             };
             db::add_todo(
                 &core.db.0.lock().unwrap(),
-                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: None, project_id: None },
+                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: c.due_at.clone().or_else(|| Some(end_of_today())), project_id: None },
             )
             .map(|t| format!("Todo added: {}", t.title))
             .map_err(|e| e.to_string())
@@ -1048,6 +1059,9 @@ mod tests {
         assert_eq!((p.kind.as_str(), p.title.as_str()), ("todo", "Renew the domain"));
         assert_eq!(parse("To-do: order cables", &[], now).title, "Order cables");
         assert_eq!(parse("add patch the ESXi host to my to do list", &[], now).title, "Patch the ESXi host");
+        let p = parse("add a todo to call Bob tomorrow", &[], now);
+        assert_eq!((p.title.as_str(), local(&p.due_at).as_str()), ("Call Bob", "21 09:00"));
+        assert!(parse("todo order cables", &[], now).due_at.is_none());
         // Anything unclear becomes a todo.
         let p = parse("pick up the new switch from the office", &[], now);
         assert_eq!((p.kind.as_str(), p.title.as_str()), ("todo", "Pick up the new switch from the office"));
@@ -1122,6 +1136,8 @@ mod tests {
         // A time in the past isn't trusted; the reminder waits for one.
         let v = serde_json::json!({ "kind": "reminder", "title": "x", "remind_at": "2026-10-19T13:00", "agent": "" });
         assert!(from_ai(&v, &agents, now).unwrap().due_at.is_none());
+        let v = serde_json::json!({ "kind": "todo", "title": "Send the quote", "remind_at": "2026-10-21T17:00", "agent": "" });
+        assert_eq!(local(&from_ai(&v, &agents, now).unwrap().due_at), "21 17:00");
         let v = serde_json::json!({ "kind": "agent", "title": "Plan my afternoon", "remind_at": "", "agent": "daily planner" });
         assert_eq!(from_ai(&v, &agents, now).unwrap().target, "agent:1");
         let v = serde_json::json!({ "kind": "agent", "title": "Fix the bug", "remind_at": "", "agent": "Local AI" });
