@@ -634,7 +634,12 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
     let mut to_run = vec![];
     {
         let conn = core.db.0.lock().unwrap();
-        for (seq, (heard, (p, via))) in found.iter().zip(read).enumerate() {
+        for (seq, (heard, (mut p, via))) in found.iter().zip(read).enumerate() {
+            // "Remind me to ..." with no time heard goes on the todo list rather
+            // than waiting in the Pocket widget for someone to pick a time.
+            if p.kind == "reminder" && p.due_at.is_none() && auto != Auto::None {
+                p.kind = "todo".into();
+            }
             conn.execute(
                 "INSERT OR IGNORE INTO pocket_commands (recording_id, seq, recorded_at, heard, kind, title, due_at, target, target_name, status, created_at, via)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
