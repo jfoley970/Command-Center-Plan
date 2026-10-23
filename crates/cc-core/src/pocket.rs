@@ -20,7 +20,7 @@
 //! found to hold no command, and dropped; their ids are kept for 30 days so the
 //! same recording isn't read twice.
 
-use chrono::{DateTime, Duration, Local, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Timelike, Utc, Weekday};
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -581,9 +581,18 @@ fn from_ai(v: &Value, agents: &[(i64, String)], now: DateTime<Local>) -> Option<
     }
 }
 
-/// Late tonight, so a todo with no date of its own sits on the dashboard's Today tab.
-fn end_of_today() -> String {
-    local_at(Local::now().date_naive(), 23, 59).map_or_else(|| Utc::now().to_rfc3339(), |t| t.with_timezone(&Utc).to_rfc3339())
+/// The default due time for a command with no time of its own: 4 PM, the close
+/// of business, today if it's a weekday before 4, else the next weekday.
+fn business_close(now: DateTime<Local>) -> String {
+    let weekday = |d: chrono::NaiveDate| !matches!(d.weekday(), Weekday::Sat | Weekday::Sun);
+    let mut day = now.date_naive();
+    if !weekday(day) || now.hour() >= 16 {
+        day = day.succ_opt().unwrap_or(day);
+        while !weekday(day) {
+            day = day.succ_opt().unwrap_or(day);
+        }
+    }
+    local_at(day, 16, 0).map_or_else(|| now.with_timezone(&Utc).to_rfc3339(), |t| t.with_timezone(&Utc).to_rfc3339())
 }
 
 async fn interpret(heard: &str, agents: &[(i64, String)], now: DateTime<Local>, model: &str) -> Result<Option<Parsed>, String> {
@@ -640,10 +649,10 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
     {
         let conn = core.db.0.lock().unwrap();
         for (seq, (heard, (mut p, via))) in found.iter().zip(read).enumerate() {
-            // "Remind me to ..." with no time heard goes on the todo list rather
-            // than waiting in the Pocket widget for someone to pick a time.
+            // "Remind me to ..." with no time heard is set for the close of
+            // business rather than waiting in the Pocket widget for a time.
             if p.kind == "reminder" && p.due_at.is_none() && auto != Auto::None {
-                p.kind = "todo".into();
+                p.due_at = Some(business_close(now));
             }
             conn.execute(
                 "INSERT OR IGNORE INTO pocket_commands (recording_id, seq, recorded_at, heard, kind, title, due_at, target, target_name, status, created_at, via)
@@ -748,7 +757,7 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
             };
             db::add_todo(
                 &core.db.0.lock().unwrap(),
-                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: c.due_at.clone().or_else(|| Some(end_of_today())), project_id: None },
+                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: c.due_at.clone().or_else(|| Some(business_close(Local::now()))), project_id: None },
             )
             .map(|t| format!("Todo added: {}", t.title))
             .map_err(|e| e.to_string())
@@ -1061,6 +1070,17 @@ mod tests {
         // Anything unclear becomes a todo.
         let p = parse("pick up the new switch from the office", &[], now);
         assert_eq!((p.kind.as_str(), p.title.as_str()), ("todo", "Pick up the new switch from the office"));
+    }
+
+    #[test]
+    fn defaults_to_the_close_of_business() {
+        // 2026-10-20 is a Tuesday.
+        assert_eq!(local(&Some(business_close(at(10, 0)))), "20 16:00");
+        assert_eq!(local(&Some(business_close(at(16, 30)))), "21 16:00");
+        let friday = at(17, 0) + Duration::days(3);
+        assert_eq!(local(&Some(business_close(friday))), "26 16:00");
+        let saturday = at(9, 0) + Duration::days(4);
+        assert_eq!(local(&Some(business_close(saturday))), "26 16:00");
     }
 
     #[test]
