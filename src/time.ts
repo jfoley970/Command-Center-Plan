@@ -29,3 +29,23 @@ export function isOverdue(iso: string | null): boolean {
 export function isToday(iso: string | null): boolean {
   return !!iso && new Date(iso).toDateString() === new Date().toDateString();
 }
+
+/** Close of business: 4 PM today on a weekday before 4, else 4 PM on the next weekday. */
+export function nextBusinessClose(now = new Date()): Date {
+  const d = new Date(now);
+  d.setHours(16, 0, 0, 0);
+  while (d.getDay() === 0 || d.getDay() === 6 || d <= now) {
+    d.setDate(d.getDate() + 1);
+    d.setHours(16, 0, 0, 0);
+  }
+  return d;
+}
+
+/**
+ * Due today, overdue, or due by the next close of business. After 4 PM (or on
+ * a weekend) that includes the next workday's items, so something added in
+ * the evening is on the Today list straight away.
+ */
+export function isDueNow(iso: string | null): boolean {
+  return !!iso && (isToday(iso) || new Date(iso).getTime() <= nextBusinessClose().getTime());
+}

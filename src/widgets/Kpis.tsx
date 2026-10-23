@@ -1,5 +1,5 @@
 import { useData } from "../data";
-import { isOverdue, isToday } from "../time";
+import { isDueNow, isOverdue, isToday } from "../time";
 import type { TodoFilter } from "./TodosWidget";
 
 /** Headline counts. Each tile filters the todo list or jumps to its widget. */
@@ -15,7 +15,7 @@ export default function Kpis({ filter, setFilter }: { filter: TodoFilter; setFil
   const tiles: { key: TodoFilter | null; label: string; value: number; tone?: "critical" }[] = [
     { key: "open", label: "Open todos", value: open.length },
     { key: "overdue", label: "Overdue", value: overdue, tone: overdue ? "critical" : undefined },
-    { key: "today", label: "Due today", value: open.filter((t) => isToday(t.due_at)).length },
+    { key: "today", label: "Due today", value: open.filter((t) => isDueNow(t.due_at) && !isOverdue(t.due_at)).length },
     { key: "done", label: "Done this week", value: doneWeek },
     { key: null, label: "Reminders left today", value: remindersLeft },
     { key: null, label: "Agent runs today", value: runsToday },
