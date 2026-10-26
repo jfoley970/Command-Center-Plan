@@ -333,7 +333,7 @@ static TODO: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:(?:add|create|new|make)\s+(?:a\s+|an\s+|new\s+)?)?(?:to[\s\-]?do|task)(?:\s+item)?\b[\s,:.\-]*(?:(?:to|that)\s+)?").unwrap()
 });
 static PROJECT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:please\s+)?(?:(?:create|make|start|add|set\s+up|open|begin)\s+(?:a\s+|an\s+)?(?:new\s+)?|new\s+)(?:sub[\s\-]?)?project\b[\s,:.\-]*(?:(?:called|named|titled|for)\s+)?").unwrap()
+    Regex::new(r"(?i)^(?:please\s+)?(?:(?:create|make|start(?:\s*up)?|add|set\s+up|open|begin)\s+(?:a\s+|an\s+)?(?:new\s+)?|new\s+)(?:sub[\s\-]?)?project\b[\s,:.\-]*(?:(?:called|named|titled|for)\s+)?").unwrap()
 });
 /// "create a website redesign project"
 static NAMED_PROJECT: LazyLock<Regex> = LazyLock::new(|| {
@@ -1198,6 +1198,8 @@ mod tests {
         assert_eq!(p("Create a project named office move."), want("Office move", ""));
         assert_eq!(p("new project: firewall refresh"), want("Firewall refresh", ""));
         assert_eq!(p("start a project for the garage"), want("The garage", ""));
+        // Pocket heard "start a project" as "startup project".
+        assert_eq!(p("startup project for custom app migration"), want("Custom app migration", ""));
         assert_eq!(p("create a website redesign project"), want("Website redesign", ""));
         assert_eq!(p("create a sub-project called backups under the homelab project"), want("Backups", "homelab"));
         assert_eq!(p("make a new project called VLANs under Network"), want("VLANs", "Network"));
