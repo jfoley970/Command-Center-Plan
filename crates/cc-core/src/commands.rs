@@ -58,6 +58,8 @@ struct ModelOption {
 struct MailSetup {
     client_id: String,
     tenant_id: String,
+    /// How often inboxes are checked for new mail.
+    sync_seconds: u64,
 }
 
 /// Runs one named command with JSON arguments and returns its JSON result.
@@ -199,7 +201,15 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             ok(MailSetup {
                 client_id: db::get_setting(&c, "ms_client_id").map_err(err)?.unwrap_or_default(),
                 tenant_id: db::get_setting(&c, "ms_tenant_id").map_err(err)?.unwrap_or_default(),
+                sync_seconds: mail::sync_seconds(&c),
             })
+        }
+        "set_mail_sync_seconds" => {
+            #[derive(Deserialize)]
+            struct A {
+                seconds: u64,
+            }
+            ok(mail::set_sync_seconds(&conn(), args::<A>(a)?.seconds)?)
         }
         "connect_microsoft" => {
             #[derive(Deserialize)]

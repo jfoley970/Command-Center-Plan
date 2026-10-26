@@ -1,9 +1,26 @@
+import { useEffect, useState } from "react";
+import { api } from "../api";
 import { useData } from "../data";
 import { registerConnector } from "./registry";
 import type { Page } from "../App";
 
+/** The server checks every inbox this often; it never goes below 10 seconds. */
+const MIN_SYNC_SECONDS = 10;
+
 function MicrosoftPanel({ go }: { go: (p: Page) => void }) {
-  const { mailAccounts } = useData();
+  const { mailAccounts, act } = useData();
+  const [seconds, setSeconds] = useState("");
+
+  useEffect(() => {
+    api.getMailSetup().then((s) => setSeconds(String(s.sync_seconds))).catch(() => {});
+  }, []);
+
+  async function saveSeconds() {
+    const n = Math.max(MIN_SYNC_SECONDS, Math.round(Number(seconds)) || MIN_SYNC_SECONDS);
+    const saved = await act(() => api.setMailSyncSeconds(n));
+    if (saved !== undefined) setSeconds(String(saved));
+  }
+
   return (
     <div className="stack-tight">
       {mailAccounts.length > 0 && (
@@ -19,6 +36,21 @@ function MicrosoftPanel({ go }: { go: (p: Page) => void }) {
           ))}
         </ul>
       )}
+      <label className="row">
+        <span className="grow">Check for new mail every</span>
+        <input
+          type="number"
+          min={MIN_SYNC_SECONDS}
+          step={1}
+          value={seconds}
+          onChange={(e) => setSeconds(e.target.value)}
+          onBlur={saveSeconds}
+          onKeyDown={(e) => e.key === "Enter" && saveSeconds()}
+          className="seconds-input"
+          aria-label="Seconds between mail checks"
+        />
+        <span>seconds</span>
+      </label>
       <div className="row">
         <button onClick={() => go("inbox")}>{mailAccounts.length ? "Manage inboxes" : "Connect an inbox"}</button>
       </div>

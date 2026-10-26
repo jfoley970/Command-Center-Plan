@@ -493,3 +493,4 @@ label.conn-head { flex-direction: row; cursor: pointer; font-size: inherit; }
 }
 .pomo-btn:hover:not(:disabled) { color: var(--text); background: var(--raised); border: none; }
 .pomo-actions { gap: 0.4rem; flex-wrap: wrap; }
+.seconds-input { width: 6em; }
