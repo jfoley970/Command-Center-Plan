@@ -2,7 +2,7 @@
 import { call } from "./transport";
 
 export type PocketAuto = "tasks" | "all" | "none";
-export type PocketKind = "todo" | "reminder" | "agent";
+export type PocketKind = "todo" | "reminder" | "project" | "agent";
 
 export type PocketCommand = {
   id: number;

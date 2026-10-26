@@ -2,8 +2,8 @@
 //!
 //! Press record, say "Command Center, remind me to call Dana at 3 PM", stop.
 //! Once Pocket has transcribed the recording, this module finds every command
-//! that follows the wake phrase and turns it into a todo, a reminder or an
-//! agent request. Recordings arrive two ways, and both may be on at once:
+//! that follows the wake phrase and turns it into a todo, a reminder, a new
+//! project or an agent request. Recordings arrive two ways, and both may be on at once:
 //!
 //! - Polling: the backend lists new recordings every two minutes with the
 //!   Pocket API key. Works anywhere, including the desktop app.
@@ -61,13 +61,14 @@ pub struct Command {
     pub recorded_at: Option<String>,
     /// The words after the wake phrase, as transcribed.
     pub heard: String,
-    /// "todo", "reminder" or "agent".
+    /// "todo", "reminder", "project" or "agent".
     pub kind: String,
     pub title: String,
     pub due_at: Option<String>,
     /// For agent requests: "agent:<id>" or "provider:<id>".
     pub target: String,
-    /// Who handles an agent request, for display.
+    /// Who handles an agent request, for display. For a new project, the
+    /// project it should sit under, as spoken.
     pub target_name: String,
     /// "pending", "done", "dismissed" or "error".
     pub status: String,
@@ -145,7 +146,7 @@ fn prune_seen(conn: &Connection) -> rusqlite::Result<()> {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Auto {
-    /// Todos and timed reminders run at once; agent requests wait for approval.
+    /// Todos, new projects and timed reminders run at once; agent requests wait for approval.
     Tasks,
     /// Agent requests run too.
     All,
@@ -331,6 +332,17 @@ static REMIND: LazyLock<Regex> = LazyLock::new(|| {
 static TODO: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:(?:add|create|new|make)\s+(?:a\s+|an\s+|new\s+)?)?(?:to[\s\-]?do|task)(?:\s+item)?\b[\s,:.\-]*(?:(?:to|that)\s+)?").unwrap()
 });
+static PROJECT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:please\s+)?(?:(?:create|make|start|add|set\s+up|open|begin)\s+(?:a\s+|an\s+)?(?:new\s+)?|new\s+)(?:sub[\s\-]?)?project\b[\s,:.\-]*(?:(?:called|named|titled|for)\s+)?").unwrap()
+});
+/// "create a website redesign project"
+static NAMED_PROJECT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:please\s+)?(?:create|make|start|set\s+up|begin)\s+(?:a\s+|an\s+)?(?:new\s+)?(.+?)\s+(?:sub[\s\-]?)?project$").unwrap()
+});
+/// "... under the Homelab project", for a sub-project.
+static UNDER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\s+(?:under|inside|within|beneath)\s+(?:the\s+|my\s+)?(.+?)(?:\s+project)?$").unwrap()
+});
 static ADD_TO_LIST: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^add\s+(.+?)\s+to\s+(?:my\s+|the\s+)?(?:to[\s\-]?do\s+|task\s+)?list$").unwrap());
 static ASK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?:ask|tell|have)\s+").unwrap());
@@ -491,8 +503,8 @@ fn route(text: &str, agents: &[(i64, String)]) -> Option<(String, String, String
     Some((format!("provider:{provider}"), name.to_string(), rest_after(1)))
 }
 
-/// Decides what a spoken command is. Anything that isn't clearly a reminder
-/// or an agent request becomes a todo, the same as Enter in the command bar.
+/// Decides what a spoken command is. Anything that isn't clearly a reminder,
+/// a new project or an agent request becomes a todo, the same as Enter in the command bar.
 pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> Parsed {
     let text = tidy(command);
     // "add a todo to call Bob tomorrow" is due tomorrow. Unclear commands keep
@@ -531,6 +543,28 @@ pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> P
             return todo(&text[m.end()..], true);
         }
     }
+    let project = |name: &str| {
+        let (name, parent) = match UNDER.captures(name) {
+            Some(c) => (&name[..c.get(0).unwrap().start()], tidy(c.get(1).unwrap().as_str())),
+            None => (name, String::new()),
+        };
+        Parsed {
+            kind: "project".into(),
+            title: capitalize(&tidy(name)),
+            due_at: None,
+            target: String::new(),
+            target_name: parent,
+            sure: true,
+        }
+    };
+    if let Some(m) = PROJECT.find(&text) {
+        if m.end() < text.len() {
+            return project(&text[m.end()..]);
+        }
+    }
+    if let Some(c) = NAMED_PROJECT.captures(&text) {
+        return project(c.get(1).unwrap().as_str());
+    }
     let asked = ASK.find(&text).map_or(text.as_str(), |m| &text[m.end()..]);
     if let Some((target, target_name, rest)) = route(asked, agents) {
         if !rest.is_empty() {
@@ -546,12 +580,13 @@ fn ai_schema() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "kind": { "type": "string", "enum": ["todo", "reminder", "agent"] },
+            "kind": { "type": "string", "enum": ["todo", "reminder", "project", "agent"] },
             "title": { "type": "string" },
             "remind_at": { "type": "string" },
-            "agent": { "type": "string" }
+            "agent": { "type": "string" },
+            "parent": { "type": "string" }
         },
-        "required": ["kind", "title", "remind_at", "agent"]
+        "required": ["kind", "title", "remind_at", "agent", "parent"]
     })
 }
 
@@ -562,10 +597,12 @@ fn ai_prompt(agents: &[(i64, String)], now: DateTime<Local>) -> String {
         "You read one spoken command James gave his personal command center app and say what it should do. \
          Reply with JSON only.\n\
          - kind \"reminder\": he wants to be alerted at a time. remind_at is that local time as YYYY-MM-DDTHH:MM.\n\
+         - kind \"project\": he wants a new project made in his project list. title is the project's name only. \
+         If he says it goes under another project, parent is that project's name.\n\
          - kind \"agent\": he is asking one of these AI agents to do something: {}. agent is that name.\n\
          - kind \"todo\": anything else he needs to do. If he says when it is due, remind_at is that local time.\n\
          title is a short task in his words, without the time or the agent's name, starting with a capital letter. \
-         Leave remind_at and agent empty when they don't apply.\n\
+         Leave remind_at, agent and parent empty when they don't apply.\n\
          It is now {} ({}).",
         names.join(", "),
         now.format("%Y-%m-%dT%H:%M"),
@@ -590,6 +627,7 @@ fn from_ai(v: &Value, agents: &[(i64, String)], now: DateTime<Local>) -> Option<
     let base = Parsed { kind: "todo".into(), title, due_at: None, target: String::new(), target_name: String::new(), sure: true };
     match field("kind") {
         "reminder" => Some(Parsed { kind: "reminder".into(), sure: at.is_some(), due_at: at, ..base }),
+        "project" => Some(Parsed { kind: "project".into(), target_name: tidy(field("parent")), ..base }),
         "agent" => match route(field("agent"), agents) {
             Some((target, target_name, _)) => Some(Parsed { kind: "agent".into(), target, target_name, ..base }),
             None => Some(base),
@@ -712,6 +750,8 @@ fn describe(kind: &str, title: &str, target_name: &str) -> String {
     match kind {
         "reminder" => format!("Reminder: {title}"),
         "agent" => format!("Ask {target_name}: {title}"),
+        "project" if !target_name.is_empty() => format!("New project under {target_name}: {title}"),
+        "project" => format!("New project: {title}"),
         _ => format!("Todo: {title}"),
     }
 }
@@ -731,7 +771,7 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
         return Err("That command already ran.".into());
     }
     if let Some(e) = edit {
-        if let Some(k) = e.kind.filter(|k| ["todo", "reminder", "agent"].contains(&k.as_str())) {
+        if let Some(k) = e.kind.filter(|k| ["todo", "reminder", "project", "agent"].contains(&k.as_str())) {
             c.kind = k;
         }
         if let Some(t) = e.title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
@@ -768,6 +808,7 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
                 })
             }
         },
+        "project" => add_project(&core.db.0.lock().unwrap(), &c.title, &c.target_name),
         "agent" => {
             let ran = match c.target.split_once(':') {
                 Some(("agent", id)) => match id.parse() {
@@ -812,6 +853,38 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
     drop(conn);
     core.changed("pocket-changed");
     Ok(c)
+}
+
+/// Makes the project a command asked for, under the named parent if there is
+/// one. Saying it twice doesn't make two.
+fn add_project(conn: &Connection, name: &str, parent: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Say what the project is called.".into());
+    }
+    let projects = db::list_projects(conn).map_err(|e| e.to_string())?;
+    let find = |n: &str| {
+        let n = n.trim();
+        let n = ["the ", "my ", "The ", "My "].iter().find_map(|a| n.strip_prefix(a)).unwrap_or(n);
+        let n = norm(n);
+        let n = n.strip_suffix("project").filter(|s| !s.is_empty()).unwrap_or(&n).to_string();
+        projects.iter().filter(|p| !p.archived).find(|p| norm(&p.name) == n || norm(&p.name) == format!("{n}project"))
+    };
+    let under = if parent.trim().is_empty() { None } else { find(parent) };
+    let missing = if !parent.trim().is_empty() && under.is_none() { format!(" (no project called {parent}, so it's at the top level)") } else { String::new() };
+    let parent_id = under.map(|p| p.id);
+    if let Some(p) = projects.iter().find(|p| norm(&p.name) == norm(name) && p.parent_id == parent_id && !p.archived) {
+        return Ok(format!("Project already exists: {}", p.name));
+    }
+    let p = db::save_project(
+        conn,
+        db::ProjectInput { id: None, name: name.into(), description: String::new(), color: "#4c8dff".into(), archived: false, parent_id },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(match under {
+        Some(u) => format!("Project added under {}: {}", u.name, p.name),
+        None => format!("Project added: {}{missing}", p.name),
+    })
 }
 
 pub fn dismiss(core: &Core, id: i64) -> Result<(), String> {
@@ -1114,6 +1187,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_new_projects() {
+        let now = at(10, 0);
+        let p = |t: &str| {
+            let p = parse(t, &[], now);
+            (p.kind, p.title, p.target_name)
+        };
+        let want = |title: &str, parent: &str| ("project".to_string(), title.to_string(), parent.to_string());
+        assert_eq!(p("create a new project called Website Redesign"), want("Website Redesign", ""));
+        assert_eq!(p("Create a project named office move."), want("Office move", ""));
+        assert_eq!(p("new project: firewall refresh"), want("Firewall refresh", ""));
+        assert_eq!(p("start a project for the garage"), want("The garage", ""));
+        assert_eq!(p("create a website redesign project"), want("Website redesign", ""));
+        assert_eq!(p("create a sub-project called backups under the homelab project"), want("Backups", "homelab"));
+        assert_eq!(p("make a new project called VLANs under Network"), want("VLANs", "Network"));
+        assert!(parse("create a new project called Website Redesign", &[], now).sure);
+        // A todo about a project is still a todo.
+        assert_eq!(parse("add a todo to plan the new project", &[], now).kind, "todo");
+        assert_eq!(parse("review the project budget", &[], now).kind, "todo");
+        // "New project" alone names nothing.
+        assert_eq!(parse("new project", &[], now).kind, "todo");
+    }
+
+    #[test]
+    fn voice_projects_land_in_the_tree_once() {
+        let c = db::mem();
+        let home = add_project(&c, "Homelab", "").unwrap();
+        assert_eq!(home, "Project added: Homelab");
+        assert_eq!(add_project(&c, "homelab", "").unwrap(), "Project already exists: Homelab");
+        assert_eq!(add_project(&c, "Backups", "the homelab project").unwrap(), "Project added under Homelab: Backups");
+        assert!(add_project(&c, "Garage", "Nowhere").unwrap().contains("top level"));
+        let ps = db::list_projects(&c).unwrap();
+        assert_eq!(ps.len(), 3);
+        let parent = ps.iter().find(|p| p.name == "Homelab").unwrap().id;
+        assert_eq!(ps.iter().find(|p| p.name == "Backups").unwrap().parent_id, Some(parent));
+        assert!(add_project(&c, " ", "").is_err());
+    }
+
+    #[test]
     fn parses_reminder_times() {
         let now = at(10, 0);
         let p = parse("remind me at 3 PM to call Dana", &[], now);
@@ -1196,6 +1307,9 @@ mod tests {
         let v = serde_json::json!({ "kind": "agent", "title": "Fix the bug", "remind_at": "", "agent": "Local AI" });
         assert_eq!(from_ai(&v, &agents, now).unwrap().target, "provider:local");
         // An agent that doesn't exist becomes a todo; an empty title is no answer at all.
+        let v = serde_json::json!({ "kind": "project", "title": "office move", "remind_at": "", "agent": "", "parent": "Work" });
+        let p = from_ai(&v, &agents, now).unwrap();
+        assert_eq!((p.kind.as_str(), p.title.as_str(), p.target_name.as_str()), ("project", "Office move", "Work"));
         let v = serde_json::json!({ "kind": "agent", "title": "Do it", "remind_at": "", "agent": "Jarvis" });
         assert_eq!(from_ai(&v, &agents, now).unwrap().kind, "todo");
         assert!(from_ai(&serde_json::json!({ "kind": "todo", "title": " " }), &agents, now).is_none());

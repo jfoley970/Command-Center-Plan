@@ -1419,18 +1419,20 @@ pub fn finish_external_run(conn: &Connection, run_id: i64, status: &str, output:
     Ok(())
 }
 
+/// A fresh in-memory database, for tests here and in other modules.
+#[cfg(test)]
+pub(crate) fn mem() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    migrate(&conn).unwrap();
+    seed_default_agent(&conn).unwrap();
+    conn
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn mem() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
-        migrate(&conn).unwrap();
-        seed_default_agent(&conn).unwrap();
-        conn
-    }
 
     #[test]
     fn project_tasks_survive_project_delete() {

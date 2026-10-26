@@ -95,7 +95,7 @@ export default function PocketCommands() {
   );
 }
 
-const KIND_LABEL: Record<PocketKind, string> = { todo: "Todo", reminder: "Reminder", agent: "Agent" };
+const KIND_LABEL: Record<PocketKind, string> = { todo: "Todo", reminder: "Reminder", project: "Project", agent: "Agent" };
 
 function capital(s: string): string {
   return s.replace(/\b\w/g, (c) => c.toUpperCase());
@@ -119,6 +119,7 @@ function PendingRow({ c, onDone }: { c: PocketCommand; onDone: () => void }) {
           <select value={kind} onChange={(e) => setKind(e.target.value as PocketKind)} aria-label="Type">
             <option value="todo">Todo</option>
             <option value="reminder">Reminder</option>
+            <option value="project">New project{c.kind === "project" && c.target_name ? ` under ${c.target_name}` : ""}</option>
             {c.target && <option value="agent">Ask {c.target_name}</option>}
           </select>
           <input className="grow" value={title} onChange={(e) => setTitle(e.target.value)} aria-label="Title" />
