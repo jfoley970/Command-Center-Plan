@@ -290,7 +290,17 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
                 input: String,
             }
             let A { agent_id, input } = args(a)?;
-            ok(run_agent(core, agent_id, input).await?)
+            ok(run_agent(core, agent_id, input, "app").await?)
+        }
+        "clear_chat" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                agent_id: i64,
+            }
+            db::clear_chat(&conn(), args::<A>(a)?.agent_id).map_err(err)?;
+            core.changed("agents-changed");
+            ok(())
         }
         "cursor_conversation" => {
             let (_, remote, key) = cursor_run(core, args::<RunId>(a)?.run_id)?;
@@ -342,7 +352,7 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
                 input: String,
             }
             let A { provider, input } = args(a)?;
-            ok(ask_provider(core, &provider, input).await?)
+            ok(ask_provider(core, &provider, input, "app").await?)
         }
 
         // ---------- Atera ----------
@@ -520,7 +530,7 @@ fn day_context(conn: &rusqlite::Connection) -> CmdResult<String> {
 
 /// "chatgpt: ..." from the dashboard or a voice command: uses the provider's
 /// first agent, making a plain one the first time.
-pub(crate) async fn ask_provider(core: &Arc<Core>, provider: &str, input: String) -> CmdResult<db::AgentRun> {
+pub(crate) async fn ask_provider(core: &Arc<Core>, provider: &str, input: String, source: &str) -> CmdResult<db::AgentRun> {
     let p = providers::find(provider).ok_or("Unknown AI provider.")?;
     if let Some(why) = p.unavailable {
         return Err(why.into());
@@ -535,10 +545,25 @@ pub(crate) async fn ask_provider(core: &Arc<Core>, provider: &str, input: String
             None => db::save_agent(&c, providers::quick_agent(p)).map_err(err)?.id,
         }
     };
-    run_agent(core, agent_id, input).await
+    run_agent(core, agent_id, input, source).await
 }
 
-pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) -> CmdResult<db::AgentRun> {
+/// How much of a chat each run sends back, so long chats cost about the same
+/// per message: the last 20 messages (10 exchanges), and at most ~6k tokens.
+const CHAT_MAX_EXCHANGES: i64 = 10;
+const CHAT_MAX_CHARS: usize = 24_000;
+
+/// Drops the oldest exchanges until the rest fit in `max_chars`.
+fn fit_history(mut history: Vec<(String, String)>, max_chars: usize) -> Vec<(String, String)> {
+    let size = |h: &[(String, String)]| h.iter().map(|(q, a)| q.len() + a.len()).sum::<usize>();
+    while !history.is_empty() && size(&history) > max_chars {
+        history.remove(0);
+    }
+    history
+}
+
+/// `source` is where the request came from ("app" or "pocket"), shown in the chat.
+pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, source: &str) -> CmdResult<db::AgentRun> {
     let agent = db::get_agent(&core.db.0.lock().unwrap(), agent_id).map_err(err)?.ok_or("That agent no longer exists.")?;
     let provider = providers::find(&agent.provider).ok_or("This agent's AI provider isn't supported.")?;
     if let Some(why) = provider.unavailable {
@@ -557,12 +582,17 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) ->
     }
 
     // Hold the lock only for database work, never across the network call.
-    let (run_id, context) = {
+    let (run_id, context, history) = {
         let conn = core.db.0.lock().unwrap();
         let input_label = if input.trim().is_empty() { "(no extra input)" } else { input.trim() };
-        let run_id = db::start_run(&conn, agent_id, input_label).map_err(err)?;
+        let run_id = db::start_run(&conn, agent_id, input_label, source).map_err(err)?;
         let context = if agent.include_context { day_context(&conn)? } else { String::new() };
-        (run_id, context)
+        let history = if agent.memory && !provider.background {
+            fit_history(db::chat_history(&conn, agent_id, run_id, CHAT_MAX_EXCHANGES).map_err(err)?, CHAT_MAX_CHARS)
+        } else {
+            vec![]
+        };
+        (run_id, context, history)
     };
     core.changed("runs-changed");
 
@@ -585,10 +615,10 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) ->
     }
 
     let result = match provider.id {
-        "chatgpt" => openai::chatgpt(&api_key, &agent.model, &agent.system_prompt, &user).await,
-        "grok" => openai::grok(&api_key, &agent.model, &agent.system_prompt, &user).await,
-        "local" => ollama::complete(&agent.model, &agent.system_prompt, &user).await,
-        _ => claude::complete(&api_key, &agent.model, &agent.system_prompt, &user).await,
+        "chatgpt" => openai::chatgpt(&api_key, &agent.model, &agent.system_prompt, &history, &user).await,
+        "grok" => openai::grok(&api_key, &agent.model, &agent.system_prompt, &history, &user).await,
+        "local" => ollama::complete(&agent.model, &agent.system_prompt, &history, &user).await,
+        _ => claude::complete(&api_key, &agent.model, &agent.system_prompt, &history, &user).await,
     };
 
     let run = {
@@ -664,6 +694,15 @@ mod tests {
         std::fs::remove_dir_all(&core.data_dir).unwrap();
     }
 
+    #[test]
+    fn long_chats_drop_their_oldest_messages() {
+        let h = |q: &str, a: &str| (q.to_string(), a.to_string());
+        let chat = vec![h("aaaa", "aaaa"), h("bb", "bb"), h("c", "c")];
+        assert_eq!(fit_history(chat.clone(), 100), chat);
+        assert_eq!(fit_history(chat.clone(), 6), vec![h("bb", "bb"), h("c", "c")]);
+        assert!(fit_history(chat, 1).is_empty());
+    }
+
     #[tokio::test]
     async fn providers_route_and_validate() {
         let core = core();
@@ -683,6 +722,11 @@ mod tests {
             let agents = call(&core, "list_agents", Value::Null).await.unwrap();
             let grok = agents.as_array().unwrap().iter().find(|a| a["provider"] == "grok").unwrap();
             assert_eq!(grok["include_context"], false);
+            assert_eq!(grok["memory"], true);
+            assert_eq!(grok["chat_since"], Value::Null);
+            call(&core, "clear_chat", json!({ "agentId": grok["id"] })).await.unwrap();
+            let agents = call(&core, "list_agents", Value::Null).await.unwrap();
+            assert!(agents.as_array().unwrap().iter().any(|a| a["provider"] == "grok" && a["chat_since"].is_string()));
             call(&core, "set_provider_key", json!({ "provider": "grok", "key": "xai-test" })).await.unwrap();
             let st = call(&core, "list_providers", Value::Null).await.unwrap();
             assert!(st.as_array().unwrap().iter().any(|p| p["id"] == "grok" && p["connected"] == true));

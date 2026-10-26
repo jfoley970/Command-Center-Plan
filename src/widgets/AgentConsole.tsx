@@ -76,6 +76,7 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
         provider: provider.id,
         repo: repo.trim(),
         include_context: false,
+        memory: false,
       }),
     );
     if (saved) {
@@ -192,6 +193,11 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
                 </div>
               )}
               {run.external_id && <CursorRun key={run.id} run={run} />}
+              {!provider?.background && run.status !== "running" && (
+                <div>
+                  <button className="ghost" onClick={() => (location.hash = `#agents/${run.agent_id}`)}>Open chat with {run.agent_name}</button>
+                </div>
+              )}
             </>
           )}
         </div>

@@ -49,6 +49,20 @@ function Shell() {
   const [inboxId, setInboxId] = useState<number | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
+  // "#agents/2" (from a notification or "Open chat") opens that agent's chat.
+  useEffect(() => {
+    const follow = () => {
+      const m = location.hash.match(/^#agents\/(\d+)$/);
+      if (!m) return;
+      setAgentId(Number(m[1]));
+      setPage("agents");
+      history.replaceState(null, "", location.pathname + location.search);
+    };
+    follow();
+    window.addEventListener("hashchange", follow);
+    return () => window.removeEventListener("hashchange", follow);
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {

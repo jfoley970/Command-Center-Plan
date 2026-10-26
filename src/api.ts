@@ -124,6 +124,10 @@ export type Agent = {
   repo: string;
   /** Whether runs include the day's open todos and reminders. */
   include_context: boolean;
+  /** Whether each message sees the earlier messages of its chat. */
+  memory: boolean;
+  /** When the current chat started ("New chat"); null means from the first run. */
+  chat_since: string | null;
 };
 
 export type ProviderId = "claude" | "chatgpt" | "grok" | "cursor" | "copilot" | "local";
@@ -158,6 +162,8 @@ export type AgentRun = {
   link: string;
   /** The remote agent working on a background run (Cursor). */
   external_id: string | null;
+  /** Where the request came from: the app, or a Pocket voice command. */
+  source: "app" | "pocket";
 };
 
 export type CursorMessage = { from: "you" | "cursor"; text: string };
@@ -212,12 +218,14 @@ export const api = {
 
   listModels: () => call<ModelOption[]>("list_models"),
   listAgents: () => call<Agent[]>("list_agents"),
-  saveAgent: (agent: Omit<Agent, "id" | "created_at"> & { id?: number }) =>
+  saveAgent: (agent: Omit<Agent, "id" | "created_at" | "chat_since"> & { id?: number }) =>
     call<Agent>("save_agent", { agent }),
   deleteAgent: (id: number) => call<void>("delete_agent", { id }),
   listRuns: (agentId?: number, limit?: number) =>
     call<AgentRun[]>("list_runs", { agentId: agentId ?? null, limit: limit ?? null }),
   runAgent: (agentId: number, input: string) => call<AgentRun>("run_agent", { agentId, input }),
+  /** Starts a new chat: later messages no longer see the earlier ones. */
+  clearChat: (agentId: number) => call<void>("clear_chat", { agentId }),
   listProviders: () => call<Provider[]>("list_providers"),
   setProviderKey: (provider: ProviderId, key: string) => call<void>("set_provider_key", { provider, key }),
   /** Asks a provider directly, using its first agent (made on first use). */

@@ -40,6 +40,9 @@ pub struct Event {
 pub struct Notice {
     pub title: String,
     pub body: String,
+    /// Where clicking the notification goes in the web app, such as "#agents/2".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 /// How Microsoft sign-in reaches a browser.
@@ -99,7 +102,13 @@ impl Core {
     }
 
     pub fn notify(&self, title: impl Into<String>, body: impl Into<String>) {
-        self.emit("notify", Notice { title: title.into(), body: body.into() });
+        self.emit("notify", Notice { title: title.into(), body: body.into(), link: None });
+    }
+
+    /// A notification that opens `link` in the web app when clicked.
+    pub fn notify_link(&self, title: impl Into<String>, body: impl Into<String>, link: impl Into<String>) {
+        let link = link.into();
+        self.emit("notify", Notice { title: title.into(), body: body.into(), link: (!link.is_empty()).then_some(link) });
     }
 }
 

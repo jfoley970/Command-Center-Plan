@@ -83,6 +83,7 @@ export default function PocketCommands() {
                   <span className={`tag kind-${c.kind}`}>{KIND_LABEL[c.kind]}</span>
                   {c.via === "local" && <span className="tag" title="The local AI worked out what this meant">Local AI</span>}
                   <span className="grow truncate">{c.result || c.title}</span>
+                  {c.link && <a className="small nowrap" href={c.link}>Open chat</a>}
                   <span className="muted small nowrap">{ago(c.created_at)}</span>
                 </li>
               ))}
