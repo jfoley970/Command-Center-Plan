@@ -1,6 +1,6 @@
 [package]
 name = "command-center"
-version = "0.1.0"
+version = "1.0.0"
 description = "Desktop command center for daily workflow and AI agents"
 authors = ["James"]
 edition = "2021"
