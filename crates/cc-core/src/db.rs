@@ -79,6 +79,20 @@ CREATE TABLE IF NOT EXISTS suggestions (
     status      TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | dismissed
     created_at  TEXT NOT NULL
 );
+-- Mail sends and deletes wait here until the user approves them (mail.rs).
+CREATE TABLE IF NOT EXISTS mail_actions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    summary     TEXT NOT NULL,               -- what the user is asked to approve
+    method      TEXT NOT NULL,               -- the Graph request, run as stored
+    path        TEXT NOT NULL,
+    body        TEXT NOT NULL DEFAULT '',
+    requested_by TEXT NOT NULL DEFAULT '',   -- ui | an agent's name
+    status      TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected | done | failed
+    error       TEXT,
+    created_at  TEXT NOT NULL,
+    decided_at  TEXT
+);
 CREATE TABLE IF NOT EXISTS flag_links (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id  INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
@@ -891,6 +905,79 @@ pub fn list_pending_suggestions(conn: &Connection) -> rusqlite::Result<Vec<Sugge
 
 pub fn dismiss_suggestion(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("UPDATE suggestions SET status = 'dismissed' WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+// ---------- Mail actions waiting for approval ----------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct MailAction {
+    pub id: i64,
+    pub account_id: i64,
+    pub summary: String,
+    pub method: String,
+    pub path: String,
+    pub body: String,
+    pub requested_by: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub decided_at: Option<String>,
+}
+
+fn mail_action_row(r: &Row) -> rusqlite::Result<MailAction> {
+    Ok(MailAction {
+        id: r.get(0)?,
+        account_id: r.get(1)?,
+        summary: r.get(2)?,
+        method: r.get(3)?,
+        path: r.get(4)?,
+        body: r.get(5)?,
+        requested_by: r.get(6)?,
+        status: r.get(7)?,
+        error: r.get(8)?,
+        created_at: r.get(9)?,
+        decided_at: r.get(10)?,
+    })
+}
+
+const MAIL_ACTION_COLS: &str = "id, account_id, summary, method, path, body, requested_by, status, error, created_at, decided_at";
+
+pub fn add_mail_action(conn: &Connection, account_id: i64, summary: &str, method: &str, path: &str, body: &str, requested_by: &str) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO mail_actions (account_id, summary, method, path, body, requested_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![account_id, summary, method, path, body, requested_by, now()],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Pending actions first, then the most recent decisions.
+pub fn list_mail_actions(conn: &Connection) -> rusqlite::Result<Vec<MailAction>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {MAIL_ACTION_COLS} FROM mail_actions ORDER BY status = 'pending' DESC, id DESC LIMIT 50"
+    ))?;
+    let rows = stmt.query_map([], mail_action_row)?;
+    rows.collect()
+}
+
+/// Moves a pending action to `status`. Returns it only if it was still pending,
+/// so an action can be approved (and run) at most once.
+pub fn decide_mail_action(conn: &Connection, id: i64, status: &str) -> rusqlite::Result<Option<MailAction>> {
+    let changed = conn.execute(
+        "UPDATE mail_actions SET status = ?2, decided_at = ?3 WHERE id = ?1 AND status = 'pending'",
+        params![id, status, now()],
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    conn.query_row(&format!("SELECT {MAIL_ACTION_COLS} FROM mail_actions WHERE id = ?1"), [id], mail_action_row).optional()
+}
+
+pub fn finish_mail_action(conn: &Connection, id: i64, error: Option<&str>) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE mail_actions SET status = ?2, error = ?3 WHERE id = ?1",
+        params![id, if error.is_some() { "failed" } else { "done" }, error],
+    )?;
     Ok(())
 }
 

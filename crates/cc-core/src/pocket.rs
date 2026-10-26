@@ -20,7 +20,7 @@
 //! found to hold no command, and dropped; their ids are kept for 30 days so the
 //! same recording isn't read twice.
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Timelike, Utc, Weekday};
+use chrono::{DateTime, Duration, Local, NaiveTime, TimeZone, Utc};
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -483,13 +483,19 @@ fn route(text: &str, agents: &[(i64, String)]) -> Option<(String, String, String
 /// or an agent request becomes a todo, the same as Enter in the command bar.
 pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> Parsed {
     let text = tidy(command);
-    let todo = |title: &str, sure: bool| Parsed {
-        kind: "todo".into(),
-        title: capitalize(&tidy(title)),
-        due_at: None,
-        target: String::new(),
-        target_name: String::new(),
-        sure,
+    // "add a todo to call Bob tomorrow" is due tomorrow. Unclear commands keep
+    // their words as they are; the local model may find a date in them.
+    let todo = |title: &str, sure: bool| {
+        let (due, title) = if sure { when(title, now) } else { (None, title.to_string()) };
+        let title = tidy(&title);
+        Parsed {
+            kind: "todo".into(),
+            title: capitalize(tidy(title.strip_prefix("to ").unwrap_or(&title)).as_str()),
+            due_at: due.map(|a| a.with_timezone(&Utc).to_rfc3339()),
+            target: String::new(),
+            target_name: String::new(),
+            sure,
+        }
     };
 
     if let Some(m) = REMIND.find(&text) {
@@ -545,7 +551,7 @@ fn ai_prompt(agents: &[(i64, String)], now: DateTime<Local>) -> String {
          Reply with JSON only.\n\
          - kind \"reminder\": he wants to be alerted at a time. remind_at is that local time as YYYY-MM-DDTHH:MM.\n\
          - kind \"agent\": he is asking one of these AI agents to do something: {}. agent is that name.\n\
-         - kind \"todo\": anything else he needs to do.\n\
+         - kind \"todo\": anything else he needs to do. If he says when it is due, remind_at is that local time.\n\
          title is a short task in his words, without the time or the agent's name, starting with a capital letter. \
          Leave remind_at and agent empty when they don't apply.\n\
          It is now {} ({}).",
@@ -563,36 +569,43 @@ fn from_ai(v: &Value, agents: &[(i64, String)], now: DateTime<Local>) -> Option<
     if title.is_empty() {
         return None;
     }
+    let at = chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M:%S"))
+        .ok()
+        .and_then(|t| Local.from_local_datetime(&t).earliest())
+        .filter(|t| *t > now)
+        .map(|a| a.with_timezone(&Utc).to_rfc3339());
     let base = Parsed { kind: "todo".into(), title, due_at: None, target: String::new(), target_name: String::new(), sure: true };
     match field("kind") {
-        "reminder" => {
-            let at = chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M")
-                .or_else(|_| chrono::NaiveDateTime::parse_from_str(field("remind_at"), "%Y-%m-%dT%H:%M:%S"))
-                .ok()
-                .and_then(|t| Local.from_local_datetime(&t).earliest())
-                .filter(|t| *t > now);
-            Some(Parsed { kind: "reminder".into(), due_at: at.map(|a| a.with_timezone(&Utc).to_rfc3339()), sure: at.is_some(), ..base })
-        }
+        "reminder" => Some(Parsed { kind: "reminder".into(), sure: at.is_some(), due_at: at, ..base }),
         "agent" => match route(field("agent"), agents) {
             Some((target, target_name, _)) => Some(Parsed { kind: "agent".into(), target, target_name, ..base }),
             None => Some(base),
         },
-        _ => Some(base),
+        _ => Some(Parsed { due_at: at, ..base }),
     }
 }
 
-/// The default due time for a command with no time of its own: 4 PM, the close
-/// of business, today if it's a weekday before 4, else the next weekday.
-fn business_close(now: DateTime<Local>) -> String {
-    let weekday = |d: chrono::NaiveDate| !matches!(d.weekday(), Weekday::Sat | Weekday::Sun);
+/// When the business day closes.
+const CLOSE_HOUR: u32 = 16;
+
+/// The default due time for a todo or reminder that names no time of its own
+/// (James, 2026-10-23): close of business, 4 PM, today if it's a weekday before
+/// 4, else the next weekday at 4.
+fn business_close(now: DateTime<Local>) -> DateTime<Local> {
+    use chrono::{Datelike, Weekday};
     let mut day = now.date_naive();
-    if !weekday(day) || now.hour() >= 16 {
-        day = day.succ_opt().unwrap_or(day);
-        while !weekday(day) {
-            day = day.succ_opt().unwrap_or(day);
+    loop {
+        let weekday = !matches!(day.weekday(), Weekday::Sat | Weekday::Sun);
+        if let Some(close) = local_at(day, CLOSE_HOUR, 0).filter(|c| weekday && *c > now) {
+            return close;
         }
+        day = day.succ_opt().unwrap_or(day);
     }
-    local_at(day, 16, 0).map_or_else(|| now.with_timezone(&Utc).to_rfc3339(), |t| t.with_timezone(&Utc).to_rfc3339())
+}
+
+fn business_close_utc() -> String {
+    business_close(Local::now()).with_timezone(&Utc).to_rfc3339()
 }
 
 async fn interpret(heard: &str, agents: &[(i64, String)], now: DateTime<Local>, model: &str) -> Result<Option<Parsed>, String> {
@@ -645,15 +658,19 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
             }
         }
     }
+    // A reminder with no time goes off at close of business instead of
+    // waiting in the Pocket widget for one.
+    let read: Vec<(Parsed, &str)> = read
+        .into_iter()
+        .map(|(p, via)| match p.kind.as_str() {
+            "reminder" if p.due_at.is_none() => (Parsed { due_at: Some(business_close_utc()), ..p }, via),
+            _ => (p, via),
+        })
+        .collect();
     let mut to_run = vec![];
     {
         let conn = core.db.0.lock().unwrap();
-        for (seq, (heard, (mut p, via))) in found.iter().zip(read).enumerate() {
-            // "Remind me to ..." with no time heard is set for the close of
-            // business rather than waiting in the Pocket widget for a time.
-            if p.kind == "reminder" && p.due_at.is_none() && auto != Auto::None {
-                p.due_at = Some(business_close(now));
-            }
+        for (seq, (heard, (p, via))) in found.iter().zip(read).enumerate() {
             conn.execute(
                 "INSERT OR IGNORE INTO pocket_commands (recording_id, seq, recorded_at, heard, kind, title, due_at, target, target_name, status, created_at, via)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
@@ -664,8 +681,7 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
             if auto.runs(&p) {
                 to_run.push(id);
             } else {
-                let why = if p.kind == "reminder" && p.due_at.is_none() { " (needs a time)" } else { "" };
-                core.notify("Pocket command to review", format!("{}{why}", describe(&p.kind, &p.title, &p.target_name)));
+                core.notify("Pocket command to review", describe(&p.kind, &p.title, &p.target_name));
             }
         }
     }
@@ -757,7 +773,7 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
             };
             db::add_todo(
                 &core.db.0.lock().unwrap(),
-                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: c.due_at.clone().or_else(|| Some(business_close(Local::now()))), project_id: None },
+                db::NewTodo { title: c.title.clone(), notes, priority: 2, due_at: c.due_at.clone().or_else(|| Some(business_close_utc())), project_id: None },
             )
             .map(|t| format!("Todo added: {}", t.title))
             .map_err(|e| e.to_string())
@@ -1067,20 +1083,12 @@ mod tests {
         assert_eq!((p.kind.as_str(), p.title.as_str()), ("todo", "Renew the domain"));
         assert_eq!(parse("To-do: order cables", &[], now).title, "Order cables");
         assert_eq!(parse("add patch the ESXi host to my to do list", &[], now).title, "Patch the ESXi host");
+        let p = parse("add a todo to call Bob tomorrow", &[], now);
+        assert_eq!((p.title.as_str(), local(&p.due_at).as_str()), ("Call Bob", "21 09:00"));
+        assert!(parse("todo order cables", &[], now).due_at.is_none());
         // Anything unclear becomes a todo.
         let p = parse("pick up the new switch from the office", &[], now);
         assert_eq!((p.kind.as_str(), p.title.as_str()), ("todo", "Pick up the new switch from the office"));
-    }
-
-    #[test]
-    fn defaults_to_the_close_of_business() {
-        // 2026-10-20 is a Tuesday.
-        assert_eq!(local(&Some(business_close(at(10, 0)))), "20 16:00");
-        assert_eq!(local(&Some(business_close(at(16, 30)))), "21 16:00");
-        let friday = at(17, 0) + Duration::days(3);
-        assert_eq!(local(&Some(business_close(friday))), "26 16:00");
-        let saturday = at(9, 0) + Duration::days(4);
-        assert_eq!(local(&Some(business_close(saturday))), "26 16:00");
     }
 
     #[test]
@@ -1152,6 +1160,8 @@ mod tests {
         // A time in the past isn't trusted; the reminder waits for one.
         let v = serde_json::json!({ "kind": "reminder", "title": "x", "remind_at": "2026-10-19T13:00", "agent": "" });
         assert!(from_ai(&v, &agents, now).unwrap().due_at.is_none());
+        let v = serde_json::json!({ "kind": "todo", "title": "Send the quote", "remind_at": "2026-10-21T17:00", "agent": "" });
+        assert_eq!(local(&from_ai(&v, &agents, now).unwrap().due_at), "21 17:00");
         let v = serde_json::json!({ "kind": "agent", "title": "Plan my afternoon", "remind_at": "", "agent": "daily planner" });
         assert_eq!(from_ai(&v, &agents, now).unwrap().target, "agent:1");
         let v = serde_json::json!({ "kind": "agent", "title": "Fix the bug", "remind_at": "", "agent": "Local AI" });
@@ -1160,6 +1170,19 @@ mod tests {
         let v = serde_json::json!({ "kind": "agent", "title": "Do it", "remind_at": "", "agent": "Jarvis" });
         assert_eq!(from_ai(&v, &agents, now).unwrap().kind, "todo");
         assert!(from_ai(&serde_json::json!({ "kind": "todo", "title": " " }), &agents, now).is_none());
+    }
+
+    #[test]
+    fn undated_items_are_due_at_close_of_business() {
+        let on = |d: u32, h: u32| {
+            Local.from_local_datetime(&chrono::NaiveDate::from_ymd_opt(2026, 10, d).unwrap().and_hms_opt(h, 30, 0).unwrap()).unwrap()
+        };
+        let close = |t| business_close(t).format("%a %d %H:%M").to_string();
+        // 2026-10-20 is a Tuesday.
+        assert_eq!(close(on(20, 9)), "Tue 20 16:00");
+        assert_eq!(close(on(20, 16)), "Wed 21 16:00");
+        assert_eq!(close(on(23, 17)), "Mon 26 16:00");
+        assert_eq!(close(on(24, 10)), "Mon 26 16:00");
     }
 
     #[test]

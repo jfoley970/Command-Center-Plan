@@ -41,7 +41,11 @@ export function nextBusinessClose(now = new Date()): Date {
   return d;
 }
 
-/** Due today, overdue, or due by the next close of business. */
+/**
+ * Due today, overdue, or due by the next close of business. After 4 PM (or on
+ * a weekend) that includes the next workday's items, so something added in
+ * the evening is on the Today list straight away.
+ */
 export function isDueNow(iso: string | null): boolean {
   return !!iso && (isToday(iso) || new Date(iso).getTime() <= nextBusinessClose().getTime());
 }

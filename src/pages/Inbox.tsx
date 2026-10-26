@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { listen, onServer, openUrl } from "../transport";
-import { api, type Email, type MailAccount, type Suggestion } from "../api";
+import { api, type Email, type MailAccount, type MailAction, type Suggestion } from "../api";
 import { useData } from "../data";
 import { formatWhen, fromLocalInput, toLocalInput } from "../time";
 
@@ -45,6 +45,7 @@ export default function Inbox({ selectedId, onSelect, go }: { selectedId: number
       </aside>
 
       <div className="grow stack">
+        <PendingMailActions accounts={mailAccounts} />
         {showConnect ? (
           <ConnectCard
             onDone={(a) => {
@@ -60,6 +61,47 @@ export default function Inbox({ selectedId, onSelect, go }: { selectedId: number
     </div>
   );
 }
+
+/** Sends and deletes wait here; the server runs one only after you approve it. */
+function PendingMailActions({ accounts }: { accounts: MailAccount[] }) {
+  const { act } = useData();
+  const [actions, setActions] = useState<MailAction[]>([]);
+
+  useEffect(() => {
+    const load = () => api.listMailActions().then(setActions).catch(() => {});
+    load();
+    const un = listen("mail-actions-changed", load);
+    return () => void un.then((f) => f());
+  }, []);
+
+  const pending = actions.filter((a) => a.status === "pending");
+  if (pending.length === 0) return null;
+  const email = (id: number) => accounts.find((a) => a.id === id)?.email ?? "an inbox";
+  return (
+    <section className="card stack">
+      <h2>Waiting for your approval</h2>
+      <p className="muted small">Command Center never sends or deletes mail until you approve it here.</p>
+      <ul className="list">
+        {pending.map((a) => (
+          <li key={a.id} className="row between">
+            <span className="grow">
+              {a.summary}
+              <span className="sub">
+                {email(a.account_id)} · {a.method} {a.path}
+                {a.requested_by ? ` · asked by ${a.requested_by}` : ""}
+              </span>
+            </span>
+            <button className="primary" onClick={() => act(() => api.approveMailAction(a.id))}>Approve</button>
+            <button className="ghost" onClick={() => act(() => api.rejectMailAction(a.id))}>Reject</button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// Keep in step with SCOPES in crates/cc-core/src/mail.rs.
+const SCOPES = ["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send", "MailboxSettings.ReadWrite", "Calendars.ReadWrite", "Contacts.ReadWrite"];
 
 function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; onCancel?: () => void }) {
   const { act } = useData();
@@ -107,8 +149,9 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
     <form className="card stack" onSubmit={connect}>
       <h2>Connect a Microsoft 365 inbox</h2>
       <p className="muted">
-        Command Center reads your inbox (read-only, it can never send or delete mail), summarizes it, and suggests todos and
-        reminders for you to approve. {onServer ? "Your sign-in stays encrypted on the Command Center server." : "Your sign-in stays in your operating system's keychain."}
+        Command Center reads your inbox, summarizes it, and suggests todos and reminders for you to approve. Signing in grants it
+        full control of this mailbox, calendar and contacts. Reading, flagging, moving and archiving can happen on their own;
+        it never sends or deletes mail until you approve each one. {onServer ? "Your sign-in stays encrypted on the Command Center server." : "Your sign-in stays in your operating system's keychain."}
       </p>
       <label>
         Application (client) ID
@@ -118,7 +161,14 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
         Directory (tenant) ID
         <input value={tenantId} onChange={(e) => setTenantId(e.target.value)} placeholder="00000000-0000-0000-0000-000000000000" autoComplete="off" />
       </label>
-      <p className="muted small">Both are on the Overview page of the Command Center app registration at entra.microsoft.com.</p>
+      <p className="muted small">
+        Both are on the Overview page of the Command Center app registration at entra.microsoft.com. If the app is registered in a
+        different tenant than this mailbox (for example because GoDaddy manages your 365 tenant), make it multitenant and enter
+        organizations (work accounts in any tenant) or common (work or personal) as the tenant ID instead.
+      </p>
+      <p className="muted small">
+        In the app registration, under API permissions &gt; Microsoft Graph &gt; Delegated, add: {SCOPES.join(", ")}.
+      </p>
       {onServer && (
         <p className="muted small">In the app registration, turn on Authentication &gt; Allow public client flows, so the server can sign in with a code.</p>
       )}
