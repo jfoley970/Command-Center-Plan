@@ -7,7 +7,9 @@
 //! flow: the UI shows a short code and a link that works from any device. That
 //! flow needs "Allow public client flows" turned on in the app registration.
 //!
-//! Access is read-only (Mail.Read). Refresh tokens live in the secret store.
+//! Access is delegated full control of the mailbox, calendar and contacts (see
+//! SCOPES), though the app itself only reads mail so far. Refresh tokens live in
+//! the secret store.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
@@ -24,7 +26,9 @@ use crate::db::{self, NewEmail, NewSuggestion};
 use crate::secrets::{mail_token_name, CLAUDE_KEY};
 use crate::{Core, SignIn};
 
-const SCOPES: &str = "offline_access User.Read Mail.Read";
+/// Every delegated Graph permission the app registration must list.
+const SCOPES: &str =
+    "offline_access User.Read Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite Calendars.ReadWrite Contacts.ReadWrite";
 const GRAPH: &str = "https://graph.microsoft.com/v1.0";
 /// How many inbox messages each sync fetches, and how many are kept locally.
 const FETCH: usize = 40;
@@ -419,11 +423,144 @@ async fn graph_get<T: serde::de::DeserializeOwned>(token: &str, url: &str) -> Re
             .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
             .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
         return Err(match status.as_u16() {
-            401 | 403 => format!("Microsoft denied mail access ({msg}). Check the Mail.Read permission and admin consent."),
+            401 | 403 => format!("Microsoft denied mail access ({msg}). Check the Mail.ReadWrite permission and admin consent."),
             code => format!("Microsoft Graph error {code}: {msg}"),
         });
     }
     serde_json::from_slice(&bytes).map_err(|e| format!("Unexpected Graph response: {e}"))
+}
+
+// ---------- Changes to the mailbox ----------
+//
+// Reading, flagging, moving and archiving run on their own. Sending and
+// deleting never do: they are stored as a mail action and run only after the
+// user approves it in the app ("approve_mail_action"), the one caller of
+// `run_approved`. Every feature or agent that changes mail goes through
+// `change_mail`, so the rule is enforced here, not in the UI.
+
+/// Graph actions whose last path segment sends mail (or a meeting reply) or deletes.
+const NEEDS_APPROVAL: &[&str] = &[
+    "send", "sendmail", "reply", "replyall", "forward", "permanentdelete",
+    "accept", "decline", "tentativelyaccept", "cancel",
+];
+
+/// Folders a move into counts as deleting.
+const DELETE_FOLDERS: &[&str] = &["deleteditems", "recoverableitemsdeletions", "recoverableitemspurges"];
+
+/// True when a Graph request would send or delete, so it must wait for approval.
+pub fn needs_approval(method: &str, path: &str, body: Option<&serde_json::Value>) -> bool {
+    let path = path.split('?').next().unwrap_or("").trim_end_matches('/').to_ascii_lowercase();
+    let last = path.rsplit('/').next().unwrap_or("");
+    let into_trash = || {
+        body.and_then(|b| b["destinationId"].as_str())
+            .is_some_and(|d| DELETE_FOLDERS.contains(&d.to_ascii_lowercase().as_str()))
+    };
+    method.eq_ignore_ascii_case("DELETE") || NEEDS_APPROVAL.contains(&last) || (matches!(last, "move" | "copy") && into_trash())
+}
+
+/// What `change_mail` did.
+#[derive(serde::Serialize, Debug)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Change {
+    /// Ran now; Graph's response (null when it had no body).
+    Done { response: serde_json::Value },
+    /// Waiting for the user to approve mail action `id`.
+    Queued { id: i64 },
+}
+
+/// Runs a change to one inbox's mailbox through Microsoft Graph, or queues it for
+/// approval when it sends or deletes. `path` is relative to the Graph root and
+/// must start with /me/. `summary` is what the user reads when asked to approve.
+pub async fn change_mail(
+    core: &Core,
+    account_id: i64,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    summary: &str,
+    requested_by: &str,
+) -> Result<Change, String> {
+    check_path(path)?;
+    if needs_approval(method, path, body.as_ref()) {
+        if summary.trim().is_empty() {
+            return Err("Say what this sends or deletes, so it can be approved.".into());
+        }
+        let body_text = body.as_ref().map(|b| b.to_string()).unwrap_or_default();
+        let id = {
+            let conn = core.db.0.lock().unwrap();
+            db::add_mail_action(&conn, account_id, summary.trim(), &method.to_ascii_uppercase(), path, &body_text, requested_by)
+                .map_err(|e| e.to_string())?
+        };
+        core.changed("mail-actions-changed");
+        core.notify("Approve a mail action", summary.trim());
+        return Ok(Change::Queued { id });
+    }
+    let account = load_account(core, account_id)?;
+    let token = access_token(core, &account).await?;
+    Ok(Change::Done { response: graph_send(&token, method, path, body.as_ref()).await? })
+}
+
+/// Runs a mail action the user approved. Only the "approve_mail_action" command calls this.
+pub async fn run_approved(core: &Core, id: i64) -> Result<db::MailAction, String> {
+    let action = {
+        let conn = core.db.0.lock().unwrap();
+        db::decide_mail_action(&conn, id, "approved").map_err(|e| e.to_string())?
+    }
+    .ok_or("That mail action was already approved or rejected.")?;
+    let body: Option<serde_json::Value> = if action.body.is_empty() {
+        None
+    } else {
+        Some(serde_json::from_str(&action.body).map_err(|e| format!("The stored request is not valid JSON: {e}"))?)
+    };
+    let result = async {
+        check_path(&action.path)?;
+        let account = load_account(core, action.account_id)?;
+        let token = access_token(core, &account).await?;
+        graph_send(&token, &action.method, &action.path, body.as_ref()).await
+    }
+    .await;
+    {
+        let conn = core.db.0.lock().unwrap();
+        db::finish_mail_action(&conn, id, result.as_ref().err().map(String::as_str)).map_err(|e| e.to_string())?;
+    }
+    core.changed("mail-actions-changed");
+    core.changed("mail-changed");
+    result?;
+    Ok(action)
+}
+
+/// Only the signed-in user's own mailbox, one request at a time: no other users'
+/// mail and no $batch, which could carry a send or delete past `needs_approval`.
+fn check_path(path: &str) -> Result<(), String> {
+    let lower = path.to_ascii_lowercase();
+    if !lower.starts_with("/me/") || lower.contains("$batch") || lower.contains("..") || lower.contains("://") {
+        return Err(format!("Mail changes must be a Graph path under /me/, not {path}."));
+    }
+    Ok(())
+}
+
+fn load_account(core: &Core, account_id: i64) -> Result<db::MailAccount, String> {
+    let conn = core.db.0.lock().unwrap();
+    db::get_account(&conn, account_id).map_err(|e| e.to_string())?.ok_or_else(|| "That inbox is no longer connected.".to_string())
+}
+
+async fn graph_send(token: &str, method: &str, path: &str, body: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+    let method = reqwest::Method::from_bytes(method.to_ascii_uppercase().as_bytes()).map_err(|_| format!("Unknown HTTP method {method}."))?;
+    let mut req = reqwest::Client::new().request(method, format!("{GRAPH}{path}")).bearer_auth(token).timeout(Duration::from_secs(60));
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+    let resp = req.send().await.map_err(|e| format!("Could not reach Microsoft Graph: {e}"))?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
+        return Err(format!("Microsoft Graph error {}: {msg}", status.as_u16()));
+    }
+    Ok(serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
 }
 
 #[derive(Deserialize)]
@@ -784,7 +921,59 @@ mod tests {
         assert_eq!(q["code_challenge_method"], "S256");
         assert_eq!(q["code_challenge"], pkce_challenge(&p.verifier));
         assert!(q["redirect_uri"].starts_with("http://localhost:"));
-        assert!(q["scope"].contains("Mail.Read"));
+        assert_eq!(q["scope"], SCOPES);
+        assert!(q["scope"].contains("Mail.ReadWrite") && q["scope"].contains("Mail.Send"));
+    }
+
+    #[test]
+    fn sends_and_deletes_need_approval() {
+        let trash = json!({ "destinationId": "DeletedItems" });
+        let archive = json!({ "destinationId": "archive" });
+        assert!(needs_approval("POST", "/me/sendMail", None));
+        assert!(needs_approval("post", "/me/messages/AAA=/reply", None));
+        assert!(needs_approval("POST", "/me/messages/AAA=/replyAll?x=1", None));
+        assert!(needs_approval("POST", "/me/messages/AAA=/forward", None));
+        assert!(needs_approval("POST", "/me/messages/AAA=/send/", None));
+        assert!(needs_approval("DELETE", "/me/messages/AAA=", None));
+        assert!(needs_approval("POST", "/me/messages/AAA=/permanentDelete", None));
+        assert!(needs_approval("POST", "/me/messages/AAA=/move", Some(&trash)));
+        assert!(needs_approval("POST", "/me/events/E/decline", None));
+        assert!(!needs_approval("PATCH", "/me/messages/AAA=", Some(&json!({ "isRead": true }))));
+        assert!(!needs_approval("POST", "/me/messages/AAA=/move", Some(&archive)));
+        assert!(!needs_approval("POST", "/me/messages", Some(&json!({ "subject": "draft" }))));
+    }
+
+    #[test]
+    fn mail_changes_stay_in_the_own_mailbox() {
+        assert!(check_path("/me/messages/AAA=").is_ok());
+        assert!(check_path("/users/someone@example.com/sendMail").is_err());
+        assert!(check_path("/$batch").is_err());
+        assert!(check_path("/me/../users/x/messages").is_err());
+        assert!(check_path("https://evil.example/me/x").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_send_waits_for_approval_and_runs_once() {
+        let dir = std::env::temp_dir().join(format!("cc-core-{}", rand::random::<u64>()));
+        let core = Core::open(&dir, crate::Secrets::new(crate::secrets::MemoryStore::default()), SignIn::DeviceCode).unwrap();
+        let account = {
+            let conn = core.db.0.lock().unwrap();
+            db::upsert_account(&conn, "me@example.com", "Me", "client", "tenant").unwrap()
+        };
+        let body = json!({ "message": { "subject": "Hi" } });
+        let out = change_mail(&core, account, "POST", "/me/sendMail", Some(body), "Send \"Hi\" to Pat", "test").await.unwrap();
+        let Change::Queued { id } = out else { panic!("a send must not run without approval") };
+        {
+            let conn = core.db.0.lock().unwrap();
+            let pending = db::list_mail_actions(&conn).unwrap();
+            assert_eq!(pending[0].status, "pending");
+            assert_eq!(pending[0].summary, "Send \"Hi\" to Pat");
+            assert!(db::decide_mail_action(&conn, id, "rejected").unwrap().is_some());
+        }
+        // Rejected: approving now does nothing, and nothing is sent.
+        assert!(run_approved(&core, id).await.is_err());
+        assert_eq!(db::list_mail_actions(&core.db.0.lock().unwrap()).unwrap()[0].status, "rejected");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

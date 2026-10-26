@@ -54,6 +54,19 @@ export type Email = {
   analyzed: boolean;
 };
 
+/** A send or delete waiting for the user's approval. The server runs it only after approve. */
+export type MailAction = {
+  id: number;
+  account_id: number;
+  summary: string;
+  method: string;
+  path: string;
+  requested_by: string;
+  status: "pending" | "approved" | "rejected" | "done" | "failed";
+  error: string | null;
+  created_at: string;
+};
+
 export type Suggestion = {
   id: number;
   account_id: number;
@@ -193,6 +206,9 @@ export const api = {
   acceptSuggestion: (suggestion: { id: number; kind: string; title: string; due_at: string | null; project_id: number | null }) =>
     call<void>("accept_suggestion", { suggestion }),
   dismissSuggestion: (id: number) => call<void>("dismiss_suggestion", { id }),
+  listMailActions: () => call<MailAction[]>("list_mail_actions"),
+  approveMailAction: (id: number) => call<MailAction>("approve_mail_action", { id }),
+  rejectMailAction: (id: number) => call<void>("reject_mail_action", { id }),
 
   listModels: () => call<ModelOption[]>("list_models"),
   listAgents: () => call<Agent[]>("list_agents"),

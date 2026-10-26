@@ -237,6 +237,16 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             ok(db::accept_suggestion(&conn(), args::<A>(a)?.suggestion)?)
         }
         "dismiss_suggestion" => ok(db::dismiss_suggestion(&conn(), args::<Id>(a)?.id).map_err(err)?),
+        // Sends and deletes queued by mail::change_mail. These are only ever called
+        // from the app's own UI, so approving one is the user's decision.
+        "list_mail_actions" => ok(db::list_mail_actions(&conn()).map_err(err)?),
+        "approve_mail_action" => ok(mail::run_approved(core, args::<Id>(a)?.id).await?),
+        "reject_mail_action" => {
+            let id = args::<Id>(a)?.id;
+            db::decide_mail_action(&conn(), id, "rejected").map_err(err)?.ok_or("That mail action was already approved or rejected.")?;
+            core.changed("mail-actions-changed");
+            ok(())
+        }
 
         // ---------- Agents ----------
         "list_models" => ok(claude::MODELS.iter().map(|(id, label)| ModelOption { id, label }).collect::<Vec<_>>()),
