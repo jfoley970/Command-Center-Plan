@@ -575,6 +575,7 @@ fn agent_system(agent: &db::Agent, others: &[db::Agent]) -> String {
         "You are \"{}\", one of the user's AI agents in their Command Center, a dashboard where they talk to each agent by name (typed, or by voice through their Pocket recorder). {memory}",
         agent.name.trim()
     );
+    note.push_str(" You can't see the user's chats, bots or history in other apps, such as the Grok or ChatGPT apps; say so if asked.");
     let names: Vec<String> = others
         .iter()
         .filter(|a| a.id != agent.id)
@@ -744,7 +745,7 @@ mod tests {
         let all = [max.clone(), agent(2, "Daily Planner", "claude", "", false)];
         let s = agent_system(&max, &all);
         assert!(s.starts_with("You are a sarcastic researcher.\n\n"));
-        assert!(s.contains("\"Max\"") && s.contains("you remember them"));
+        assert!(s.contains("\"Max\"") && s.contains("you remember them") && s.contains("Grok or ChatGPT apps"));
         assert!(s.contains("Daily Planner (") && !s.contains("Max ("));
         let alone = agent_system(&agent(3, "Solo", "local", "", false), &[]);
         assert!(alone.starts_with("You are \"Solo\"") && alone.contains("Memory is off") && !alone.contains("other agents"));
