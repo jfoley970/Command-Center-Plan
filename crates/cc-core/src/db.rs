@@ -197,6 +197,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute_batch(&format!("ALTER TABLE flag_links ADD COLUMN {column} {def}"))?;
         }
     }
+    // Where the inbox's Graph delta sync carries on from (mail.rs). Not sent to the UI.
+    if !has_column(conn, "mail_accounts", "delta_link")? {
+        conn.execute_batch("ALTER TABLE mail_accounts ADD COLUMN delta_link TEXT")?;
+    }
     if !has_column(conn, "projects", "parent_id")? {
         conn.execute_batch("ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id) ON DELETE SET NULL")?;
     }
@@ -742,6 +746,15 @@ pub fn delete_account(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
+pub fn get_delta_link(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT delta_link FROM mail_accounts WHERE id = ?1", [id], |r| r.get(0)).optional().map(Option::flatten)
+}
+
+pub fn set_delta_link(conn: &Connection, id: i64, link: Option<&str>) -> rusqlite::Result<()> {
+    conn.execute("UPDATE mail_accounts SET delta_link = ?1 WHERE id = ?2", params![link, id])?;
+    Ok(())
+}
+
 pub fn set_sync_result(conn: &Connection, id: i64, error: Option<&str>) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE mail_accounts SET last_sync_at = ?1, last_error = ?2 WHERE id = ?3",
@@ -804,6 +817,18 @@ fn email_from_row(r: &Row) -> rusqlite::Result<Email> {
 
 /// Stores fetched messages, refreshing read state on ones already stored.
 /// Returns how many were new. Keeps only the newest `keep` per account.
+/// Copies read/unread from Outlook onto messages already stored. Returns how many changed.
+pub fn update_read_states(conn: &Connection, account_id: i64, emails: &[NewEmail]) -> rusqlite::Result<usize> {
+    let mut changed = 0;
+    for e in emails {
+        changed += conn.execute(
+            "UPDATE emails SET is_read = ?1 WHERE account_id = ?2 AND remote_id = ?3 AND is_read != ?1",
+            params![e.is_read as i64, account_id, e.remote_id],
+        )?;
+    }
+    Ok(changed)
+}
+
 pub fn store_emails(conn: &Connection, account_id: i64, emails: &[NewEmail], keep: i64) -> rusqlite::Result<usize> {
     let mut added = 0;
     for e in emails {
@@ -1727,5 +1752,25 @@ mod tests {
         assert_eq!((runs[0].id, runs[0].status.as_str(), runs[0].link.as_str()), (remote, "done", "https://cursor.example/1"));
         assert_eq!(runs[2].id, run);
         assert_eq!(runs[2].status, "error");
+    }
+
+    #[test]
+    fn delta_cursor_and_read_changes_are_stored() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        migrate(&c).unwrap();
+        let a = upsert_account(&c, "me@example.com", "Me", "client", "tenant").unwrap();
+        assert_eq!(get_delta_link(&c, a).unwrap(), None);
+        set_delta_link(&c, a, Some("https://graph.microsoft.com/v1.0/x?$deltatoken=1")).unwrap();
+        assert!(get_delta_link(&c, a).unwrap().unwrap().ends_with("deltatoken=1"));
+        set_delta_link(&c, a, None).unwrap();
+        assert_eq!(get_delta_link(&c, a).unwrap(), None);
+
+        let mut e = sample_email("1", "2026-09-01T10:00:00Z");
+        store_emails(&c, a, &[e.clone()], 100).unwrap();
+        assert_eq!(update_read_states(&c, a, &[e.clone()]).unwrap(), 0);
+        e.is_read = !e.is_read;
+        assert_eq!(update_read_states(&c, a, &[e.clone()]).unwrap(), 1);
+        assert_eq!(update_read_states(&c, a, &[e]).unwrap(), 0);
     }
 }

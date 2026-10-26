@@ -199,7 +199,8 @@ export const api = {
     call<Project>("save_project", { project }),
   deleteProject: (id: number) => call<void>("delete_project", { id }),
 
-  getMailSetup: () => call<{ client_id: string; tenant_id: string }>("get_mail_setup"),
+  getMailSetup: () => call<{ client_id: string; tenant_id: string; sync_seconds: number }>("get_mail_setup"),
+  setMailSyncSeconds: (seconds: number) => call<number>("set_mail_sync_seconds", { seconds }),
   connectMicrosoft: (clientId: string, tenantId: string) =>
     call<MailAccount>("connect_microsoft", { clientId, tenantId }),
   mailSignInPrompt: () => call<{ user_code: string; verification_uri: string } | null>("mail_sign_in_prompt"),
