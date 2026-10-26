@@ -24,7 +24,7 @@ export default function Inbox({ selectedId, onSelect, go }: { selectedId: number
       <aside className="card agent-list">
         <div className="row between">
           <h2>Inboxes</h2>
-          <button onClick={() => setConnecting(true)}>Add</button>
+          {!showConnect && <button onClick={() => setConnecting(true)}>Add</button>}
         </div>
         {mailAccounts.length === 0 && <p className="muted">None connected yet.</p>}
         <ul className="list dense">
@@ -66,6 +66,7 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
   const [clientId, setClientId] = useState("");
   const [tenantId, setTenantId] = useState("");
   const [waiting, setWaiting] = useState(false);
+  const [missing, setMissing] = useState(false);
   // On the server, Microsoft sign-in uses a code you enter at a link, from any device.
   const [prompt, setPrompt] = useState<{ user_code: string; verification_uri: string } | null>(null);
 
@@ -73,6 +74,13 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
     const un = listen<{ user_code: string; verification_uri: string }>("mail-sign-in", (e) => setPrompt(e.payload));
     return () => void un.then((f) => f());
   }, []);
+
+  // The event only arrives over the WebSocket, so also ask for the code directly.
+  useEffect(() => {
+    if (!waiting || !onServer || prompt) return;
+    const t = setInterval(() => api.mailSignInPrompt().then((p) => p && setPrompt(p)).catch(() => {}), 1500);
+    return () => clearInterval(t);
+  }, [waiting, prompt]);
 
   useEffect(() => {
     api.getMailSetup().then((s) => {
@@ -83,6 +91,11 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
 
   async function connect(e: FormEvent) {
     e.preventDefault();
+    if (!clientId.trim() || !tenantId.trim()) {
+      setMissing(true);
+      return;
+    }
+    setMissing(false);
     setWaiting(true);
     const account = await act(() => api.connectMicrosoft(clientId, tenantId));
     setWaiting(false);
@@ -109,6 +122,7 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
       {onServer && (
         <p className="muted small">In the app registration, turn on Authentication &gt; Allow public client flows, so the server can sign in with a code.</p>
       )}
+      {missing && <p className="notice bad" role="alert">Enter both IDs from the app registration first.</p>}
       {prompt && (
         <div className="card stack">
           <p>
@@ -118,7 +132,7 @@ function ConnectCard({ onDone, onCancel }: { onDone: (a: MailAccount) => void; o
         </div>
       )}
       <div className="row">
-        <button className="primary" type="submit" disabled={waiting || !clientId.trim() || !tenantId.trim()}>
+        <button className="primary" type="submit" disabled={waiting}>
           {waiting ? (onServer ? "Waiting for Microsoft sign-in…" : "Finish signing in in your browser…") : "Sign in with Microsoft"}
         </button>
         {onCancel && !waiting && <button type="button" onClick={onCancel}>Cancel</button>}

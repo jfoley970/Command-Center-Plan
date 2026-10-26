@@ -13,6 +13,8 @@ pub const UNIFI_KEY: &str = "unifi-site-manager-api-key";
 pub const OPENAI_KEY: &str = "openai-api-key";
 pub const XAI_KEY: &str = "xai-api-key";
 pub const CURSOR_KEY: &str = "cursor-api-key";
+pub const POCKET_KEY: &str = "pocket-api-key";
+pub const POCKET_WEBHOOK_SECRET: &str = "pocket-webhook-secret";
 
 pub fn mail_token_name(email: &str) -> String {
     format!("ms-refresh:{}", email.to_lowercase())
@@ -40,6 +42,7 @@ impl Secrets {
             OPENAI_KEY => Some("OPENAI_API_KEY"),
             XAI_KEY => Some("XAI_API_KEY"),
             CURSOR_KEY => Some("CURSOR_API_KEY"),
+            POCKET_KEY => Some("POCKET_API_KEY"),
             _ => None,
         }
     }

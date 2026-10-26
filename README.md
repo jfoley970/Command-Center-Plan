@@ -72,5 +72,6 @@ deploy/              Docker Compose, Caddy and setup notes for the server
 
 ## Roadmap
 
+- **Pocket voice commands (built):** start a Pocket recording with "Command Center, ..." and the command becomes a todo, a reminder or an agent request (Settings > Connections > Pocket recorder).
 - **Milestone 2:** email digest with draft replies (Microsoft 365 or Gmail), calendar on the dashboard, push-to-talk voice commands, read-only ESXi host status (VMs, host health, datastores), and agent tools via MCP.
 - **Milestone 3:** reporting, ESXi actions (power, snapshots, console) with confirmations, opt-in wake-word listening.

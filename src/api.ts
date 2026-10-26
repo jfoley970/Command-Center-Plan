@@ -113,7 +113,7 @@ export type Agent = {
   include_context: boolean;
 };
 
-export type ProviderId = "claude" | "chatgpt" | "grok" | "cursor" | "copilot";
+export type ProviderId = "claude" | "chatgpt" | "grok" | "cursor" | "copilot" | "local";
 
 export type Provider = {
   id: ProviderId;
@@ -124,6 +124,8 @@ export type Provider = {
   /** Why it can't be used from the app yet, if it can't. */
   unavailable: string | null;
   models: ModelOption[];
+  /** How a provider without a key is doing ("3 models ready", or why it can't be reached). */
+  note: string | null;
 };
 
 export type AgentRun = {
@@ -181,6 +183,7 @@ export const api = {
   getMailSetup: () => call<{ client_id: string; tenant_id: string }>("get_mail_setup"),
   connectMicrosoft: (clientId: string, tenantId: string) =>
     call<MailAccount>("connect_microsoft", { clientId, tenantId }),
+  mailSignInPrompt: () => call<{ user_code: string; verification_uri: string } | null>("mail_sign_in_prompt"),
   listMailAccounts: () => call<MailAccount[]>("list_mail_accounts"),
   listEmails: (accountId: number) => call<Email[]>("list_emails", { accountId }),
   syncMail: (accountId: number) => call<number>("sync_mail", { accountId }),

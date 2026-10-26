@@ -22,7 +22,8 @@ RUN mkdir -p src-tauri/src && echo "fn main() {}" > src-tauri/src/main.rs && tou
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata curl \
  && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --home /data cc
+ && useradd --system --uid 10001 --home /data cc \
+ && mkdir -p /data && chown cc:cc /data
 COPY --from=server /src/target/release/cc-server /usr/local/bin/cc-server
 COPY --from=web /src/dist /srv/web
 ENV CC_DATA_DIR=/data CC_WEB_DIR=/srv/web CC_BIND=0.0.0.0:8484

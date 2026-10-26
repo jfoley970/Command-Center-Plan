@@ -17,7 +17,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::db::{self, NewEmail, NewSuggestion};
@@ -238,6 +238,23 @@ pub struct DevicePrompt {
     pub message: String,
 }
 
+/// The code the server is waiting on, so a page that missed the "mail-sign-in"
+/// event (its WebSocket was down, or it was opened later) can still show it.
+static DEVICE_PROMPT: Mutex<Option<DevicePrompt>> = Mutex::new(None);
+
+pub fn device_prompt() -> Option<DevicePrompt> {
+    DEVICE_PROMPT.lock().unwrap().clone()
+}
+
+/// Clears the stored code however the sign-in ends.
+struct ClearPrompt;
+
+impl Drop for ClearPrompt {
+    fn drop(&mut self) {
+        *DEVICE_PROMPT.lock().unwrap() = None;
+    }
+}
+
 async fn device_sign_in(core: &Core, client_id: &str, tenant_id: &str) -> Result<SignedIn, String> {
     let http = reqwest::Client::new();
     let resp = http
@@ -253,10 +270,10 @@ async fn device_sign_in(core: &Core, client_id: &str, tenant_id: &str) -> Result
         return Err(format!("Microsoft rejected the sign-in: {}", token_error_text(&bytes)));
     }
     let dc: DeviceCodeResponse = serde_json::from_slice(&bytes).map_err(|e| format!("Unexpected device code response: {e}"))?;
-    core.emit(
-        "mail-sign-in",
-        DevicePrompt { user_code: dc.user_code.clone(), verification_uri: dc.verification_uri.clone(), message: dc.message.clone() },
-    );
+    let prompt = DevicePrompt { user_code: dc.user_code.clone(), verification_uri: dc.verification_uri.clone(), message: dc.message.clone() };
+    *DEVICE_PROMPT.lock().unwrap() = Some(prompt.clone());
+    let _clear = ClearPrompt;
+    core.emit("mail-sign-in", prompt);
 
     let deadline = Instant::now() + Duration::from_secs(dc.expires_in);
     let mut interval = dc.interval.max(1);

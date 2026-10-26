@@ -16,6 +16,8 @@ const ALIASES: Record<string, ProviderId> = {
   grok: "grok",
   cursor: "cursor",
   copilot: "copilot",
+  local: "local",
+  ollama: "local",
 };
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");

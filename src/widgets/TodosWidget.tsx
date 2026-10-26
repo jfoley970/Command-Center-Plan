@@ -2,7 +2,7 @@ import { useState, type CSSProperties, type FormEvent, type ReactElement } from 
 import { api, type Project, type Todo } from "../api";
 import { useData } from "../data";
 import { buildProjectTree, type ProjectNode } from "../projectTree";
-import { formatWhen, isOverdue, isToday } from "../time";
+import { formatWhen, isDueNow, isOverdue } from "../time";
 import TodoDetail from "./TodoDetail";
 import Widget from "./Widget";
 
@@ -61,7 +61,7 @@ export function applyFilter(todos: Todo[], f: TodoFilter): Todo[] {
     case "open":
       return todos.filter((t) => !t.done);
     case "today":
-      return todos.filter((t) => !t.done && (isToday(t.due_at) || isOverdue(t.due_at)));
+      return todos.filter((t) => !t.done && isDueNow(t.due_at));
     case "overdue":
       return todos.filter((t) => !t.done && isOverdue(t.due_at));
     case "done":

@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::secrets::CLAUDE_KEY;
-use crate::{atera, claude, cursor, db, mail, openai, pomodoro, providers, transfer, unifi, Core};
+use crate::{atera, claude, cursor, db, mail, ollama, openai, pocket, pomodoro, providers, transfer, unifi, Core};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -211,6 +211,7 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             let A { client_id, tenant_id } = args(a)?;
             ok(mail::connect(core, &client_id, &tenant_id).await?)
         }
+        "mail_sign_in_prompt" => ok(mail::device_prompt()),
         "list_mail_accounts" => ok(db::list_accounts(&conn()).map_err(err)?),
         "list_emails" => ok(db::list_emails(&conn(), args::<AccountId>(a)?.account_id, 50).map_err(err)?),
         "sync_mail" => {
@@ -311,7 +312,7 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             core.changed("runs-changed");
             ok(())
         }
-        "list_providers" => ok(providers::statuses(&core.secrets)?),
+        "list_providers" => ok(providers::statuses(&core.secrets).await?),
         "set_provider_key" => {
             #[derive(Deserialize)]
             struct A {
@@ -325,29 +326,13 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             ok(())
         }
         "ask_provider" => {
-            // "chatgpt: ..." from the dashboard: use the provider's first agent,
-            // making a plain one the first time.
             #[derive(Deserialize)]
             struct A {
                 provider: String,
                 input: String,
             }
             let A { provider, input } = args(a)?;
-            let p = providers::find(&provider).ok_or("Unknown AI provider.")?;
-            if let Some(why) = p.unavailable {
-                return Err(why.into());
-            }
-            let agent_id = {
-                let c = conn();
-                match db::list_agents(&c).map_err(err)?.into_iter().find(|a| a.provider == p.id) {
-                    Some(a) => a.id,
-                    None if p.background => {
-                        return Err(format!("Make a {} agent under Agents first, so it knows which repository to work on.", p.name))
-                    }
-                    None => db::save_agent(&c, providers::quick_agent(p)).map_err(err)?.id,
-                }
-            };
-            ok(run_agent(core, agent_id, input).await?)
+            ok(ask_provider(core, &provider, input).await?)
         }
 
         // ---------- Atera ----------
@@ -387,6 +372,52 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             core.changed("unifi-changed");
             ok(())
         }
+
+        // ---------- Pocket recorder ----------
+        "pocket_status" => ok(core.pocket.snapshot(core)?),
+        "pocket_refresh" => ok(pocket::refresh(core).await?),
+        "pocket_set_key" => {
+            let key = args::<Key>(a)?.key;
+            core.secrets.set(crate::secrets::POCKET_KEY, &key)?;
+            if !key.trim().is_empty() {
+                pocket::mark_connected(core)?;
+            }
+            ok(pocket::refresh(core).await?)
+        }
+        "pocket_set_webhook_secret" => {
+            let key = args::<Key>(a)?.key;
+            core.secrets.set(crate::secrets::POCKET_WEBHOOK_SECRET, &key)?;
+            if !key.trim().is_empty() {
+                pocket::mark_connected(core)?;
+            }
+            core.changed("pocket-changed");
+            ok(core.pocket.snapshot(core)?)
+        }
+        "pocket_set_options" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                wake: String,
+                auto: pocket::Auto,
+                ai: bool,
+                #[serde(default)]
+                ai_model: String,
+            }
+            let A { wake, auto, ai, ai_model } = args(a)?;
+            pocket::set_options(core, &wake, auto, ai, &ai_model)?;
+            ok(core.pocket.snapshot(core)?)
+        }
+        "pocket_run" => {
+            #[derive(Deserialize)]
+            struct A {
+                id: i64,
+                #[serde(default)]
+                edit: Option<pocket::Edit>,
+            }
+            let A { id, edit } = args(a)?;
+            ok(pocket::run(core, id, edit).await?)
+        }
+        "pocket_dismiss" => ok(pocket::dismiss(core, args::<Id>(a)?.id)?),
 
         // ---------- Connectors moving between Command Centers ----------
         // There is deliberately no export command: keys never leave over the API.
@@ -477,17 +508,40 @@ fn day_context(conn: &rusqlite::Connection) -> CmdResult<String> {
     Ok(s)
 }
 
-async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) -> CmdResult<db::AgentRun> {
+/// "chatgpt: ..." from the dashboard or a voice command: uses the provider's
+/// first agent, making a plain one the first time.
+pub(crate) async fn ask_provider(core: &Arc<Core>, provider: &str, input: String) -> CmdResult<db::AgentRun> {
+    let p = providers::find(provider).ok_or("Unknown AI provider.")?;
+    if let Some(why) = p.unavailable {
+        return Err(why.into());
+    }
+    let agent_id = {
+        let c = core.db.0.lock().unwrap();
+        match db::list_agents(&c).map_err(err)?.into_iter().find(|a| a.provider == p.id) {
+            Some(a) => a.id,
+            None if p.background => {
+                return Err(format!("Make a {} agent under Agents first, so it knows which repository to work on.", p.name))
+            }
+            None => db::save_agent(&c, providers::quick_agent(p)).map_err(err)?.id,
+        }
+    };
+    run_agent(core, agent_id, input).await
+}
+
+pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) -> CmdResult<db::AgentRun> {
     let agent = db::get_agent(&core.db.0.lock().unwrap(), agent_id).map_err(err)?.ok_or("That agent no longer exists.")?;
     let provider = providers::find(&agent.provider).ok_or("This agent's AI provider isn't supported.")?;
     if let Some(why) = provider.unavailable {
         return Err(why.into());
     }
-    let key_name = provider.key.ok_or("This provider doesn't take a key.")?;
-    let api_key = core
-        .secrets
-        .get(key_name)?
-        .ok_or_else(|| format!("Add your {} key in Settings > Connections before running this agent.", provider.name))?;
+    let api_key = match provider.key {
+        Some(name) => core
+            .secrets
+            .get(name)?
+            .ok_or_else(|| format!("Add your {} key in Settings > Connections before running this agent.", provider.name))?,
+        None if provider.local => String::new(),
+        None => return Err("This provider doesn't take a key.".into()),
+    };
     if provider.background && input.trim().is_empty() && agent.system_prompt.trim().is_empty() {
         return Err(format!("Tell {} what to do first.", provider.name));
     }
@@ -523,6 +577,7 @@ async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String) -> CmdResult<
     let result = match provider.id {
         "chatgpt" => openai::chatgpt(&api_key, &agent.model, &agent.system_prompt, &user).await,
         "grok" => openai::grok(&api_key, &agent.model, &agent.system_prompt, &user).await,
+        "local" => ollama::complete(&agent.model, &agent.system_prompt, &user).await,
         _ => claude::complete(&api_key, &agent.model, &agent.system_prompt, &user).await,
     };
 
