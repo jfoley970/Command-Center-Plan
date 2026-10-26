@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::claude::Completion;
+use crate::claude::{messages, Completion, History};
 
 /// Where Ollama answers. On the server Compose sets `CC_OLLAMA_URL` to the
 /// `ollama` service; without it, Ollama on this computer.
@@ -54,15 +54,10 @@ fn parse_tags(v: &Value) -> Vec<(String, String)> {
     out.into_iter().map(|(_, n, l)| (n, l)).collect()
 }
 
-fn chat_body(model: &str, system: &str, user: &str) -> Value {
-    json!({
-        "model": model,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user },
-        ],
-        "stream": false,
-    })
+fn chat_body(model: &str, system: &str, history: &History, user: &str) -> Value {
+    let mut all = vec![json!({ "role": "system", "content": system })];
+    all.extend(messages(history, user));
+    json!({ "model": model, "messages": all, "stream": false })
 }
 
 fn parse_chat(v: &Value) -> Completion {
@@ -76,7 +71,7 @@ fn parse_chat(v: &Value) -> Completion {
 }
 
 /// One answer from a local model. An empty model means the first one pulled.
-pub async fn complete(model: &str, system: &str, user: &str) -> Result<Completion, String> {
+pub async fn complete(model: &str, system: &str, history: &History, user: &str) -> Result<Completion, String> {
     let model = if model.trim().is_empty() {
         models().await?.into_iter().next().map(|m| m.0).ok_or("No local models yet. Pull one into Ollama first.")?
     } else {
@@ -86,7 +81,7 @@ pub async fn complete(model: &str, system: &str, user: &str) -> Result<Completio
     let resp = reqwest::Client::new()
         .post(format!("{}/api/chat", url()))
         .timeout(Duration::from_secs(900))
-        .json(&chat_body(&model, system, user))
+        .json(&chat_body(&model, system, history, user))
         .send()
         .await
         .map_err(|e| format!("Could not reach Ollama at {}: {e}", url()))?;
@@ -110,7 +105,7 @@ pub async fn complete_json(model: &str, system: &str, user: &str, schema: Value,
     } else {
         model.to_string()
     };
-    let mut body = chat_body(&model, system, user);
+    let mut body = chat_body(&model, system, &[], user);
     body["format"] = schema;
     body["options"] = json!({ "temperature": 0 });
     let resp = reqwest::Client::new()
@@ -158,7 +153,7 @@ mod tests {
         let c = parse_chat(&v);
         assert_eq!((c.text.as_str(), c.stop_reason.as_str(), c.input_tokens, c.output_tokens), ("Hello.", "end_turn", 12, 3));
         assert_eq!(parse_chat(&json!({ "done_reason": "length" })).stop_reason, "max_tokens");
-        let body = chat_body("m", "sys", "hi");
+        let body = chat_body("m", "sys", &[], "hi");
         assert_eq!(body["stream"], false);
         assert_eq!(body["messages"][1]["content"], "hi");
     }

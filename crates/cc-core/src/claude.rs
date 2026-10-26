@@ -51,12 +51,25 @@ struct ApiErrorDetail {
     message: String,
 }
 
-fn request_body(model: &str, system: &str, user: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
+/// Earlier exchanges in an agent's chat, oldest first: (what was asked, what it answered).
+pub type History = [(String, String)];
+
+/// The chat so far as user/assistant messages, ending with the new request.
+pub fn messages(history: &History, user: &str) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = history
+        .iter()
+        .flat_map(|(asked, answered)| [json!({ "role": "user", "content": asked }), json!({ "role": "assistant", "content": answered })])
+        .collect();
+    out.push(json!({ "role": "user", "content": user }));
+    out
+}
+
+fn request_body(model: &str, system: &str, history: &History, user: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
     let mut body = json!({
         "model": model,
         "max_tokens": 16000,
         "system": system,
-        "messages": [{ "role": "user", "content": user }],
+        "messages": messages(history, user),
     });
     // Structured outputs: the reply is guaranteed to be JSON matching the schema.
     if let Some(schema) = schema {
@@ -69,8 +82,8 @@ fn request_body(model: &str, system: &str, user: &str, schema: Option<&serde_jso
     body
 }
 
-pub async fn complete(api_key: &str, model: &str, system: &str, user: &str) -> Result<Completion, String> {
-    send(api_key, request_body(model, system, user, None)).await
+pub async fn complete(api_key: &str, model: &str, system: &str, history: &History, user: &str) -> Result<Completion, String> {
+    send(api_key, request_body(model, system, history, user, None)).await
 }
 
 /// Like `complete`, but constrains the reply to `schema` and parses it.
@@ -81,7 +94,7 @@ pub async fn complete_json<T: serde::de::DeserializeOwned>(
     user: &str,
     schema: &serde_json::Value,
 ) -> Result<(T, Completion), String> {
-    let c = send(api_key, request_body(model, system, user, Some(schema))).await?;
+    let c = send(api_key, request_body(model, system, &[], user, Some(schema))).await?;
     match c.stop_reason.as_str() {
         "refusal" => return Err(c.text),
         "max_tokens" => return Err("Claude's reply was cut off before it finished.".into()),
@@ -153,7 +166,7 @@ mod tests {
 
     #[test]
     fn opus_requests_carry_fallbacks() {
-        let b = request_body("claude-opus-5", "sys", "hi", None);
+        let b = request_body("claude-opus-5", "sys", &[], "hi", None);
         assert_eq!(b["fallbacks"], "default");
         assert_eq!(b["messages"][0]["content"], "hi");
         assert!(b.get("thinking").is_none());
@@ -162,14 +175,14 @@ mod tests {
 
     #[test]
     fn other_models_do_not() {
-        assert!(request_body("claude-sonnet-5", "s", "u", None).get("fallbacks").is_none());
-        assert!(request_body("claude-haiku-4-5", "s", "u", None).get("fallbacks").is_none());
+        assert!(request_body("claude-sonnet-5", "s", &[], "u", None).get("fallbacks").is_none());
+        assert!(request_body("claude-haiku-4-5", "s", &[], "u", None).get("fallbacks").is_none());
     }
 
     #[test]
     fn schema_goes_in_output_config() {
         let schema = json!({ "type": "object", "properties": {}, "additionalProperties": false });
-        let b = request_body("claude-opus-5", "s", "u", Some(&schema));
+        let b = request_body("claude-opus-5", "s", &[], "u", Some(&schema));
         assert_eq!(b["output_config"]["format"]["type"], "json_schema");
         assert_eq!(b["output_config"]["format"]["schema"], schema);
     }

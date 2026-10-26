@@ -20,6 +20,8 @@ export type PocketCommand = {
   created_at: string;
   /** "local" when the local model worked out what the command meant. */
   via: "rules" | "local";
+  /** Where to see the outcome in the app, such as "#agents/2" for an agent's chat. */
+  link: string;
 };
 
 export type PocketSnapshot = {

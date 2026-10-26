@@ -75,9 +75,11 @@ pub struct Command {
     pub created_at: String,
     /// "rules" or "local" (the local model read it).
     pub via: String,
+    /// Where to see the outcome in the app, such as "#agents/2" for an agent's chat.
+    pub link: String,
 }
 
-const COLS: &str = "id, recording_id, recorded_at, heard, kind, title, due_at, target, target_name, status, result, created_at, via";
+const COLS: &str = "id, recording_id, recorded_at, heard, kind, title, due_at, target, target_name, status, result, created_at, via, link";
 
 fn from_row(r: &Row) -> rusqlite::Result<Command> {
     Ok(Command {
@@ -94,6 +96,7 @@ fn from_row(r: &Row) -> rusqlite::Result<Command> {
         result: r.get(10)?,
         created_at: r.get(11)?,
         via: r.get(12)?,
+        link: r.get(13)?,
     })
 }
 
@@ -109,8 +112,8 @@ fn get(conn: &Connection, id: i64) -> rusqlite::Result<Option<Command>> {
     conn.query_row(&format!("SELECT {COLS} FROM pocket_commands WHERE id = ?1"), [id], from_row).optional()
 }
 
-fn finish(conn: &Connection, id: i64, status: &str, result: &str) -> rusqlite::Result<()> {
-    conn.execute("UPDATE pocket_commands SET status = ?2, result = ?3 WHERE id = ?1", params![id, status, result])?;
+fn finish(conn: &Connection, id: i64, status: &str, result: &str, link: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE pocket_commands SET status = ?2, result = ?3, link = ?4 WHERE id = ?1", params![id, status, result, link])?;
     Ok(())
 }
 
@@ -289,6 +292,15 @@ pub fn extract(transcript: &str, wake: &str) -> Vec<String> {
 fn tidy(s: &str) -> String {
     let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     s.trim_matches(|c: char| !c.is_alphanumeric() && c != '?' && c != ')' && c != '"' && c != '\'').to_string()
+}
+
+/// The start of `s` on one line, at most `max` characters, for a notification.
+fn preview(s: &str, max: usize) -> String {
+    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match one_line.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", one_line[..at].trim_end()),
+        None => one_line,
+    }
 }
 
 fn capitalize(s: &str) -> String {
@@ -688,8 +700,8 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
     core.changed("pocket-changed");
     for id in to_run {
         match run(core, id, None).await {
-            Ok(c) if c.status == "done" => core.notify("Pocket", c.result),
-            Ok(c) => core.notify("Pocket command failed", c.result),
+            Ok(c) if c.status == "done" => core.notify_link("Pocket", c.result, c.link),
+            Ok(c) => core.notify_link("Pocket command failed", c.result, c.link),
             Err(e) => core.notify("Pocket command failed", e),
         }
     }
@@ -739,6 +751,8 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
             .map_err(|e| e.to_string())?;
     }
 
+    // An agent's reply is in its chat, so the command links there.
+    let mut link = String::new();
     let outcome: Result<String, String> = match c.kind.as_str() {
         "reminder" => match &c.due_at {
             None => Err("Pick a time for this reminder first.".into()),
@@ -757,13 +771,21 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
         "agent" => {
             let ran = match c.target.split_once(':') {
                 Some(("agent", id)) => match id.parse() {
-                    Ok(id) => commands::run_agent(core, id, c.title.clone()).await,
+                    Ok(id) => commands::run_agent(core, id, c.title.clone(), "pocket").await,
                     Err(_) => Err("That agent no longer exists.".into()),
                 },
-                Some(("provider", p)) => commands::ask_provider(core, p, c.title.clone()).await,
+                Some(("provider", p)) => commands::ask_provider(core, p, c.title.clone(), "pocket").await,
                 _ => Err("Say which agent should handle this, such as \"Cursor, ...\".".into()),
             };
-            ran.map(|_| format!("Sent to {}: {}", c.target_name, c.title))
+            ran.and_then(|r| {
+                link = format!("#agents/{}", r.agent_id);
+                match r.status.as_str() {
+                    "done" => Ok(format!("{} replied: {}", r.agent_name, preview(&r.output, 160))),
+                    // Background agents (Cursor) finish later and notify then.
+                    "running" => Ok(format!("Sent to {}: {}", r.agent_name, c.title)),
+                    _ => Err(format!("{} couldn't answer: {}", r.agent_name, preview(&r.output, 160))),
+                }
+            })
         }
         _ => {
             let when = c.recorded_at.as_deref().and_then(|d| DateTime::parse_from_rfc3339(d).ok());
@@ -785,7 +807,7 @@ pub async fn run(core: &Arc<Core>, id: i64, edit: Option<Edit>) -> Result<Comman
         Err(e) => ("error", e),
     };
     let conn = core.db.0.lock().unwrap();
-    finish(&conn, id, status, &result).map_err(|e| e.to_string())?;
+    finish(&conn, id, status, &result, &link).map_err(|e| e.to_string())?;
     let c = get(&conn, id).map_err(|e| e.to_string())?.ok_or("That command no longer exists.")?;
     drop(conn);
     core.changed("pocket-changed");
@@ -1108,6 +1130,13 @@ mod tests {
         assert_eq!(parse("remind me to send the invoice tomorrow", &[], now).title, "Send the invoice");
         let p = parse("set a reminder to call the ISP", &[], now);
         assert_eq!((p.kind.as_str(), p.title.as_str(), p.due_at.is_none()), ("reminder", "Call the ISP", true));
+    }
+
+    #[test]
+    fn previews_fit_on_one_line() {
+        assert_eq!(preview("Hi  there\nJames", 50), "Hi there James");
+        assert_eq!(preview("abcdef ghij", 7), "abcdef…");
+        assert_eq!(preview("héllo wörld", 5), "héllo…");
     }
 
     #[test]

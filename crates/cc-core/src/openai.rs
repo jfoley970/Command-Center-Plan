@@ -3,18 +3,19 @@
 
 use serde_json::{json, Value};
 
-use crate::claude::Completion;
+use crate::claude::{messages, Completion, History};
 
 pub const OPENAI_URL: &str = "https://api.openai.com/v1/responses";
 pub const XAI_URL: &str = "https://api.x.ai/v1/chat/completions";
 
 /// The ChatGPT tools an agent can use. Web search and running code are on for
 /// every ChatGPT agent, like they are in the ChatGPT app.
-fn responses_body(model: &str, system: &str, user: &str) -> Value {
+fn responses_body(model: &str, system: &str, history: &History, user: &str) -> Value {
+    let input = if history.is_empty() { json!(user) } else { json!(messages(history, user)) };
     json!({
         "model": model,
         "instructions": system,
-        "input": user,
+        "input": input,
         "tools": [
             { "type": "web_search" },
             { "type": "code_interpreter", "container": { "type": "auto" } },
@@ -72,14 +73,10 @@ fn parse_responses(v: &Value) -> Completion {
     }
 }
 
-fn chat_body(model: &str, system: &str, user: &str) -> Value {
-    json!({
-        "model": model,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user },
-        ],
-    })
+fn chat_body(model: &str, system: &str, history: &History, user: &str) -> Value {
+    let mut all = vec![json!({ "role": "system", "content": system })];
+    all.extend(messages(history, user));
+    json!({ "model": model, "messages": all })
 }
 
 fn parse_chat(v: &Value) -> Completion {
@@ -126,13 +123,13 @@ async fn post(url: &str, service: &str, api_key: &str, body: &Value) -> Result<V
     Ok(v)
 }
 
-pub async fn chatgpt(api_key: &str, model: &str, system: &str, user: &str) -> Result<Completion, String> {
-    let v = post(OPENAI_URL, "the OpenAI API", api_key, &responses_body(model, system, user)).await?;
+pub async fn chatgpt(api_key: &str, model: &str, system: &str, history: &History, user: &str) -> Result<Completion, String> {
+    let v = post(OPENAI_URL, "the OpenAI API", api_key, &responses_body(model, system, history, user)).await?;
     Ok(parse_responses(&v))
 }
 
-pub async fn grok(api_key: &str, model: &str, system: &str, user: &str) -> Result<Completion, String> {
-    let v = post(XAI_URL, "the xAI API", api_key, &chat_body(model, system, user)).await?;
+pub async fn grok(api_key: &str, model: &str, system: &str, history: &History, user: &str) -> Result<Completion, String> {
+    let v = post(XAI_URL, "the xAI API", api_key, &chat_body(model, system, history, user)).await?;
     Ok(parse_chat(&v))
 }
 
@@ -142,7 +139,7 @@ mod tests {
 
     #[test]
     fn chatgpt_requests_turn_on_search_and_code() {
-        let b = responses_body("gpt-5", "be brief", "hi");
+        let b = responses_body("gpt-5", "be brief", &[], "hi");
         assert_eq!(b["instructions"], "be brief");
         assert_eq!(b["input"], "hi");
         let tools: Vec<&str> = b["tools"].as_array().unwrap().iter().map(|t| t["type"].as_str().unwrap()).collect();
@@ -190,6 +187,18 @@ mod tests {
         assert_eq!(c.text, "Hello");
         assert_eq!(c.model, "grok-4");
         assert_eq!(c.output_tokens, 1);
-        assert_eq!(chat_body("grok-4", "s", "u")["messages"][1]["content"], "u");
+        assert_eq!(chat_body("grok-4", "s", &[], "u")["messages"][1]["content"], "u");
+    }
+
+    #[test]
+    fn earlier_messages_are_sent_in_order() {
+        let history = [("Hi, I'm James".to_string(), "Hi James!".to_string())];
+        let b = chat_body("grok-4", "You are Max.", &history, "What's my name?");
+        let roles: Vec<&str> = b["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user"]);
+        assert_eq!(b["messages"][2]["content"], "Hi James!");
+        assert_eq!(b["messages"][3]["content"], "What's my name?");
+        let r = responses_body("gpt-5", "s", &history, "again");
+        assert_eq!(r["input"].as_array().unwrap().len(), 3);
     }
 }

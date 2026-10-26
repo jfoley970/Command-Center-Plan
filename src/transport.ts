@@ -70,7 +70,7 @@ let socket: WebSocket | null = null;
 let retry = 1000;
 
 function dispatch(name: string, payload: unknown) {
-  if (name === "notify") showNotification(payload as { title: string; body: string });
+  if (name === "notify") showNotification(payload as { title: string; body: string; link?: string });
   if (name === "resync") {
     for (const [event, set] of handlers) if (refreshes(event)) set.forEach((h) => h({ payload: null }));
     return;
@@ -128,9 +128,17 @@ export function openUrl(url: string): Promise<void> {
 // The desktop app shows OS notifications itself; in a browser we ask once, on
 // the first click, because browsers ignore permission requests without one.
 
-function showNotification({ title, body }: { title: string; body: string }) {
+function showNotification({ title, body, link }: { title: string; body: string; link?: string }) {
   if (isDesktop || typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  new Notification(title, { body });
+  const n = new Notification(title, { body });
+  // An agent's reply opens its chat.
+  if (link) {
+    n.onclick = () => {
+      window.focus();
+      location.hash = link;
+      n.close();
+    };
+  }
 }
 
 if (!isDesktop && typeof window !== "undefined" && typeof Notification !== "undefined" && Notification.permission === "default") {

@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS pocket_commands (
     result       TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL,
     via          TEXT NOT NULL DEFAULT 'rules', -- rules | local
+    link         TEXT NOT NULL DEFAULT '',   -- where to see the outcome, such as an agent's chat
     UNIQUE (recording_id, seq)
 );
 
@@ -206,8 +207,20 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute_batch(&format!("ALTER TABLE agents ADD COLUMN {column} {def}"))?;
         }
     }
+    // Chat memory. Grok agents are where it was asked for first, so they start
+    // with it on; other existing agents keep answering each run on its own.
+    if !has_column(conn, "agents", "memory")? {
+        conn.execute_batch("ALTER TABLE agents ADD COLUMN memory INTEGER NOT NULL DEFAULT 0; UPDATE agents SET memory = 1 WHERE provider = 'grok';")?;
+    }
+    if !has_column(conn, "pocket_commands", "link")? {
+        conn.execute_batch("ALTER TABLE pocket_commands ADD COLUMN link TEXT NOT NULL DEFAULT ''")?;
+    }
+    if !has_column(conn, "agents", "chat_since")? {
+        conn.execute_batch("ALTER TABLE agents ADD COLUMN chat_since TEXT")?;
+    }
     // Background runs (Cursor) keep the remote agent's id until they finish.
-    for (column, def) in [("external_id", "TEXT"), ("link", "TEXT NOT NULL DEFAULT ''")] {
+    // `source` says where the request came from: app | pocket.
+    for (column, def) in [("external_id", "TEXT"), ("link", "TEXT NOT NULL DEFAULT ''"), ("source", "TEXT NOT NULL DEFAULT 'app'")] {
         if !has_column(conn, "agent_runs", column)? {
             conn.execute_batch(&format!("ALTER TABLE agent_runs ADD COLUMN {column} {def}"))?;
         }
@@ -1156,6 +1169,10 @@ pub struct Agent {
     pub repo: String,
     /// Whether runs include the day's open todos and reminders.
     pub include_context: bool,
+    /// Whether each run sees the earlier messages of its chat.
+    pub memory: bool,
+    /// When the current chat started ("New chat"); none means from the first run.
+    pub chat_since: Option<String>,
 }
 
 fn default_provider() -> String {
@@ -1181,6 +1198,8 @@ pub struct AgentInput {
     pub repo: String,
     #[serde(default = "yes")]
     pub include_context: bool,
+    #[serde(default = "yes")]
+    pub memory: bool,
 }
 
 fn agent_from_row(r: &Row) -> rusqlite::Result<Agent> {
@@ -1194,10 +1213,12 @@ fn agent_from_row(r: &Row) -> rusqlite::Result<Agent> {
         provider: r.get(6)?,
         repo: r.get(7)?,
         include_context: r.get::<_, i64>(8)? != 0,
+        memory: r.get::<_, i64>(9)? != 0,
+        chat_since: r.get(10)?,
     })
 }
 
-const AGENT_COLS: &str = "id, name, description, system_prompt, model, created_at, provider, repo, include_context";
+const AGENT_COLS: &str = "id, name, description, system_prompt, model, created_at, provider, repo, include_context, memory, chat_since";
 
 pub fn list_agents(conn: &Connection) -> rusqlite::Result<Vec<Agent>> {
     let mut stmt = conn.prepare(&format!("SELECT {AGENT_COLS} FROM agents ORDER BY name"))?;
@@ -1218,21 +1239,41 @@ pub fn save_agent(conn: &Connection, a: AgentInput) -> rusqlite::Result<Agent> {
     let id = match a.id {
         Some(id) => {
             conn.execute(
-                "UPDATE agents SET name = ?1, description = ?2, system_prompt = ?3, model = ?4, provider = ?5, repo = ?6, include_context = ?7 WHERE id = ?8",
-                params![a.name.trim(), a.description, a.system_prompt, a.model, a.provider, a.repo.trim(), a.include_context, id],
+                "UPDATE agents SET name = ?1, description = ?2, system_prompt = ?3, model = ?4, provider = ?5, repo = ?6, include_context = ?7, memory = ?8 WHERE id = ?9",
+                params![a.name.trim(), a.description, a.system_prompt, a.model, a.provider, a.repo.trim(), a.include_context, a.memory, id],
             )?;
             id
         }
         None => {
             conn.execute(
-                "INSERT INTO agents (name, description, system_prompt, model, provider, repo, include_context, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![a.name.trim(), a.description, a.system_prompt, a.model, a.provider, a.repo.trim(), a.include_context, now()],
+                "INSERT INTO agents (name, description, system_prompt, model, provider, repo, include_context, memory, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![a.name.trim(), a.description, a.system_prompt, a.model, a.provider, a.repo.trim(), a.include_context, a.memory, now()],
             )?;
             conn.last_insert_rowid()
         }
     };
     conn.query_row(&format!("SELECT {AGENT_COLS} FROM agents WHERE id = ?1"), [id], agent_from_row)
+}
+
+/// Starts a new chat: later runs no longer see the messages before now.
+pub fn clear_chat(conn: &Connection, agent_id: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE agents SET chat_since = ?1 WHERE id = ?2", params![now(), agent_id])?;
+    Ok(())
+}
+
+/// The latest finished exchanges of an agent's current chat before `run_id`,
+/// oldest first, at most `max` of them.
+pub fn chat_history(conn: &Connection, agent_id: i64, run_id: i64, max: i64) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.input, r.output FROM agent_runs r JOIN agents a ON a.id = r.agent_id
+         WHERE r.agent_id = ?1 AND r.id < ?2 AND r.status = 'done' AND r.input != '(no extra input)'
+           AND (a.chat_since IS NULL OR r.started_at > a.chat_since)
+         ORDER BY r.id DESC LIMIT ?3",
+    )?;
+    let mut rows = stmt.query_map(params![agent_id, run_id, max], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.reverse();
+    Ok(rows)
 }
 
 pub fn delete_agent(conn: &Connection, id: i64) -> rusqlite::Result<()> {
@@ -1258,12 +1299,14 @@ pub struct AgentRun {
     pub link: String,
     /// The remote agent working on a background run (Cursor).
     pub external_id: Option<String>,
+    /// Where the request came from: "app" or "pocket".
+    pub source: String,
 }
 
-pub fn start_run(conn: &Connection, agent_id: i64, input: &str) -> rusqlite::Result<i64> {
+pub fn start_run(conn: &Connection, agent_id: i64, input: &str, source: &str) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO agent_runs (agent_id, input, status, started_at) VALUES (?1, ?2, 'running', ?3)",
-        params![agent_id, input, now()],
+        "INSERT INTO agent_runs (agent_id, input, status, started_at, source) VALUES (?1, ?2, 'running', ?3, ?4)",
+        params![agent_id, input, now(), source],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -1284,7 +1327,7 @@ pub fn finish_run(
     Ok(())
 }
 
-const RUN_COLS: &str = "r.id, r.agent_id, a.name, a.provider, r.input, r.output, r.status, r.model, r.input_tokens, r.output_tokens, r.started_at, r.finished_at, r.link, r.external_id";
+const RUN_COLS: &str = "r.id, r.agent_id, a.name, a.provider, r.input, r.output, r.status, r.model, r.input_tokens, r.output_tokens, r.started_at, r.finished_at, r.link, r.external_id, r.source";
 
 pub fn list_runs(conn: &Connection, agent_id: Option<i64>, limit: i64) -> rusqlite::Result<Vec<AgentRun>> {
     let mut stmt = conn.prepare(&format!(
@@ -1321,6 +1364,7 @@ fn run_from_row(r: &Row) -> rusqlite::Result<AgentRun> {
             finished_at: r.get(11)?,
             link: r.get(12)?,
             external_id: r.get(13)?,
+            source: r.get(14)?,
         })
 }
 
@@ -1633,14 +1677,39 @@ mod tests {
     }
 
     #[test]
+    fn chat_history_follows_the_current_chat() {
+        let c = mem();
+        let a = list_agents(&c).unwrap()[0].id;
+        let say = |input: &str, output: &str, status: &str| {
+            let id = start_run(&c, a, input, "app").unwrap();
+            finish_run(&c, id, status, output, "m", 0, 0).unwrap();
+            id
+        };
+        say("one", "1", "done");
+        say("two", "nope", "error");
+        say("three", "3", "done");
+        let next = start_run(&c, a, "four", "pocket").unwrap();
+        let h = chat_history(&c, a, next, 10).unwrap();
+        assert_eq!(h, vec![("one".to_string(), "1".to_string()), ("three".to_string(), "3".to_string())]);
+        assert_eq!(chat_history(&c, a, next, 1).unwrap(), vec![("three".to_string(), "3".to_string())]);
+        assert_eq!(get_run(&c, next).unwrap().unwrap().source, "pocket");
+        // Make sure the new chat starts strictly after the earlier runs.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        clear_chat(&c, a).unwrap();
+        assert!(get_agent(&c, a).unwrap().unwrap().chat_since.is_some());
+        let later = start_run(&c, a, "five", "app").unwrap();
+        assert!(chat_history(&c, a, later, 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn default_agent_and_runs() {
         let c = mem();
         let agents = list_agents(&c).unwrap();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].provider, "claude");
         assert!(agents[0].include_context);
-        let run = start_run(&c, agents[0].id, "hi").unwrap();
-        let remote = start_run(&c, agents[0].id, "in the cloud").unwrap();
+        let run = start_run(&c, agents[0].id, "hi", "app").unwrap();
+        let remote = start_run(&c, agents[0].id, "in the cloud", "app").unwrap();
         set_run_external(&c, remote, "bc-1", "https://cursor.example/1").unwrap();
         mark_orphaned_runs(&c).unwrap();
         let ext = list_external_runs(&c).unwrap();

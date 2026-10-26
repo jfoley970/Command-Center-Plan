@@ -123,6 +123,7 @@ pub fn quick_agent(p: &Provider) -> crate::db::AgentInput {
         provider: p.id.to_string(),
         repo: String::new(),
         include_context: false,
+        memory: !p.background,
     }
 }
 
