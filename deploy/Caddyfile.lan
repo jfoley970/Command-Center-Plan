@@ -1,0 +1,45 @@
+# Command Center on your own network only, before the public setup.
+#
+#   https://{$LAN_ADDRESS}  the app, behind a browser password prompt.
+#
+# Caddy makes its own certificate authority for this address, so browsers warn
+# until you trust its root certificate (deploy/README.md, "LAN only"). Nothing
+# here is reachable from the internet: Compose binds Caddy to LAN_ADDRESS, and
+# your edge forwards no ports to it.
+{
+	# Clients send no SNI when they connect to a bare IP, so tell Caddy which
+	# certificate to use; without this the TLS handshake fails.
+	default_sni {$LAN_ADDRESS}
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://{$LAN_ADDRESS} {
+	tls internal
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		Permissions-Policy "camera=(), geolocation=(), microphone=(self)"
+		Content-Security-Policy "default-src 'self'; connect-src 'self' wss://{$LAN_ADDRESS}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+
+	# Every path, health check, API and WebSocket included, needs the password.
+	basic_auth {
+		{$LAN_USER} {$LAN_PASSWORD_HASH}
+	}
+
+	# cc-server trusts this header as the signed-in user, so Caddy sets it itself,
+	# replacing whatever a client sent, and drops the password. (Caddy applies
+	# deletes after sets, so the username header must not be in a delete.)
+	reverse_proxy cc-server:8484 {
+		header_up X-Authentik-Username {http.auth.user.id}
+		header_up -X-Authentik-Groups
+		header_up -X-Authentik-Email
+		header_up -Authorization
+	}
+}

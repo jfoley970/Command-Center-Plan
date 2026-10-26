@@ -211,6 +211,7 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             let A { client_id, tenant_id } = args(a)?;
             ok(mail::connect(core, &client_id, &tenant_id).await?)
         }
+        "mail_sign_in_prompt" => ok(mail::device_prompt()),
         "list_mail_accounts" => ok(db::list_accounts(&conn()).map_err(err)?),
         "list_emails" => ok(db::list_emails(&conn(), args::<AccountId>(a)?.account_id, 50).map_err(err)?),
         "sync_mail" => {
