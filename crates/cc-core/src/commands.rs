@@ -562,6 +562,36 @@ fn fit_history(mut history: Vec<(String, String)>, max_chars: usize) -> Vec<(Str
     history
 }
 
+/// The agent's own instructions plus a short note on who it is, whether it
+/// remembers the chat, and which other agents exist. Without it a model asked
+/// about "your memory" or "my other bots" says it has none.
+fn agent_system(agent: &db::Agent, others: &[db::Agent]) -> String {
+    let memory = if agent.memory {
+        "The earlier messages of this chat are included, so you remember them; older ones drop off once the chat gets long."
+    } else {
+        "Memory is off for you, so each message starts fresh."
+    };
+    let mut note = format!(
+        "You are \"{}\", one of the user's AI agents in their Command Center, a dashboard where they talk to each agent by name (typed, or by voice through their Pocket recorder). {memory}",
+        agent.name.trim()
+    );
+    let names: Vec<String> = others
+        .iter()
+        .filter(|a| a.id != agent.id)
+        .map(|a| format!("{} ({})", a.name.trim(), providers::find(&a.provider).map_or(a.provider.as_str(), |p| p.name)))
+        .collect();
+    if !names.is_empty() {
+        note.push_str(&format!(
+            " The other agents are: {}. You can't see their chats or message them; the user talks to each one by name.",
+            names.join(", ")
+        ));
+    }
+    match agent.system_prompt.trim() {
+        "" => note,
+        own => format!("{own}\n\n{note}"),
+    }
+}
+
 /// `source` is where the request came from ("app" or "pocket"), shown in the chat.
 pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, source: &str) -> CmdResult<db::AgentRun> {
     let agent = db::get_agent(&core.db.0.lock().unwrap(), agent_id).map_err(err)?.ok_or("That agent no longer exists.")?;
@@ -582,7 +612,7 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
     }
 
     // Hold the lock only for database work, never across the network call.
-    let (run_id, context, history) = {
+    let (run_id, context, history, system) = {
         let conn = core.db.0.lock().unwrap();
         let input_label = if input.trim().is_empty() { "(no extra input)" } else { input.trim() };
         let run_id = db::start_run(&conn, agent_id, input_label, source).map_err(err)?;
@@ -592,7 +622,8 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         } else {
             vec![]
         };
-        (run_id, context, history)
+        let system = agent_system(&agent, &db::list_agents(&conn).map_err(err)?);
+        (run_id, context, history, system)
     };
     core.changed("runs-changed");
 
@@ -615,10 +646,10 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
     }
 
     let result = match provider.id {
-        "chatgpt" => openai::chatgpt(&api_key, &agent.model, &agent.system_prompt, &history, &user).await,
-        "grok" => openai::grok(&api_key, &agent.model, &agent.system_prompt, &history, &user).await,
-        "local" => ollama::complete(&agent.model, &agent.system_prompt, &history, &user).await,
-        _ => claude::complete(&api_key, &agent.model, &agent.system_prompt, &history, &user).await,
+        "chatgpt" => openai::chatgpt(&api_key, &agent.model, &system, &history, &user).await,
+        "grok" => openai::grok(&api_key, &agent.model, &system, &history, &user).await,
+        "local" => ollama::complete(&agent.model, &system, &history, &user).await,
+        _ => claude::complete(&api_key, &agent.model, &system, &history, &user).await,
     };
 
     let run = {
@@ -692,6 +723,31 @@ mod tests {
         assert!(call(&core, "ui_set", json!({ "key": "../ms_client_id", "value": 1 })).await.is_err());
         assert!(db::get_setting(&core.db.0.lock().unwrap(), "ms_client_id").unwrap().is_none());
         std::fs::remove_dir_all(&core.data_dir).unwrap();
+    }
+
+    #[test]
+    fn agents_know_their_name_memory_and_siblings() {
+        let agent = |id: i64, name: &str, provider: &str, prompt: &str, memory: bool| db::Agent {
+            id,
+            name: name.into(),
+            description: String::new(),
+            system_prompt: prompt.into(),
+            model: String::new(),
+            created_at: String::new(),
+            provider: provider.into(),
+            repo: String::new(),
+            include_context: false,
+            memory,
+            chat_since: None,
+        };
+        let max = agent(1, "Max", "grok", "You are a sarcastic researcher.", true);
+        let all = [max.clone(), agent(2, "Daily Planner", "claude", "", false)];
+        let s = agent_system(&max, &all);
+        assert!(s.starts_with("You are a sarcastic researcher.\n\n"));
+        assert!(s.contains("\"Max\"") && s.contains("you remember them"));
+        assert!(s.contains("Daily Planner (") && !s.contains("Max ("));
+        let alone = agent_system(&agent(3, "Solo", "local", "", false), &[]);
+        assert!(alone.starts_with("You are \"Solo\"") && alone.contains("Memory is off") && !alone.contains("other agents"));
     }
 
     #[test]
