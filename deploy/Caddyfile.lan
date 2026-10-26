@@ -26,6 +26,7 @@ https://{$LAN_ADDRESS} {
 		Permissions-Policy "camera=(), geolocation=(), microphone=(self)"
 		Content-Security-Policy "default-src 'self'; connect-src 'self' wss://{$LAN_ADDRESS}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		-Server
+		defer
 	}
 
 	# Every path, health check, API and WebSocket included, needs the password.

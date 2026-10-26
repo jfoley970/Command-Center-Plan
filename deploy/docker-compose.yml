@@ -1,7 +1,7 @@
 # Command Center on the Linux server.
 #
 #   cd deploy && cp .env.example .env   # fill it in
-#   openssl rand -hex 32 > secrets/cc-secret-key && chmod 600 secrets/cc-secret-key
+#   openssl rand -hex 32 > secrets/cc-secret-key && chmod 600 secrets/cc-secret-key && sudo chown 10001 secrets/cc-secret-key
 #   docker compose up -d --build
 #
 # Caddy is the only thing that listens on the network: on PUBLIC_ADDRESS (the

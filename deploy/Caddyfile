@@ -27,6 +27,7 @@
 		Referrer-Policy "same-origin"
 		Permissions-Policy "camera=(), geolocation=(), microphone=(self)"
 		-Server
+		defer
 	}
 	log {
 		output file /data/access.log {

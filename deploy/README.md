@@ -73,6 +73,7 @@ CPU; see *Local AI* below). Install Docker (`curl -fsSL https://get.docker.com |
    cd deploy
    cp .env.example .env                  # names, addresses, ACME_EMAIL, TZ
    mkdir -p secrets && openssl rand -hex 32 > secrets/cc-secret-key && chmod 600 secrets/cc-secret-key
+   sudo chown 10001 secrets/cc-secret-key   # cc-server runs as uid 10001; back it up with sudo
    docker compose up -d --build
    ```
    Caddy gets public certificates for both names on first start.
