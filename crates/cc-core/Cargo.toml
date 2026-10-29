@@ -1,6 +1,6 @@
 [package]
 name = "cc-core"
-version = "1.0.0"
+version = "1.1.0"
 description = "Command Center backend: database, connectors, agents and background jobs"
 authors = ["James"]
 edition = "2021"
