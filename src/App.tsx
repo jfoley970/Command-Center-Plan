@@ -13,6 +13,12 @@ import Agents from "./pages/Agents";
 import Settings from "./pages/Settings";
 import ReminderAlerts from "./ReminderAlerts";
 import TopBar from "./TopBar";
+import "@fontsource/oxanium/latin-500.css";
+import "@fontsource/oxanium/latin-600.css";
+import "@fontsource/oxanium/latin-700.css";
+import "@fontsource/share-tech-mono/latin-400.css";
+import "@fontsource/titillium-web/latin-400.css";
+import "@fontsource/titillium-web/latin-600.css";
 import "./styles.css";
 
 export type Page = "dashboard" | "inbox" | "projects" | "todos" | "reminders" | "agents" | "settings";

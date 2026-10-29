@@ -1,28 +1,34 @@
-/* Dark theme only. Chart and status colors come from the dataviz reference palette,
-   validated against a near-black surface. */
+/* Dark theme only, styled after a sci-fi helmet HUD: teal holo panels with angular cut corners.
+   Fonts are bundled (@fontsource) so the desktop app works offline. */
 :root {
   color-scheme: dark;
-  --bg: #0e0f11;
-  --panel: #18191c;
-  --panel-2: #202227;
-  --raised: #262930;
-  --border: #2a2d33;
-  --border-strong: #3a3e46;
-  --text: #eceef1;
-  --text-2: #b9bec7;
-  --muted: #8a909b;
-  --accent: #3987e5;         /* series 1 (blue): reminders, bars, primary actions */
-  --accent-hover: #5598e7;
-  --series-2: #d95926;       /* series 2 (orange): todos due */
-  --critical: #d03b3b;       /* status: overdue, errors */
-  --critical-bg: rgba(208, 59, 59, 0.16);
-  --warning: #fab219;        /* status: reminder just fired */
-  --good: #0ca30c;
-  --p1: #e66767;
-  --p2: #3987e5;
-  --p3: #5c6370;
-  --radius: 12px;
-  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bg: #040b0e;
+  --panel: #0a1a20;
+  --panel-2: #0f242b;
+  --raised: #143039;
+  --border: #173a44;
+  --border-strong: #2a6470;
+  --text: #d6fbff;
+  --text-2: #a7d4da;
+  --muted: #6f9ea6;
+  --accent: #4fd8e8;         /* series 1 (holo teal): reminders, bars, primary actions */
+  --accent-hover: #7aeaf6;
+  --accent-rgb: 79, 216, 232;
+  --on-accent: #031014;
+  --glow: 0 0 10px rgba(var(--accent-rgb), 0.45);
+  --series-2: #f2a03d;       /* series 2 (amber): todos due */
+  --critical: #ff5a4f;       /* status: overdue, errors */
+  --critical-bg: rgba(255, 90, 79, 0.14);
+  --warning: #ffe36b;        /* status: reminder just fired */
+  --good: #3fd97a;
+  --p1: #ff5a4f;
+  --p2: #4fd8e8;
+  --p3: #4a6c73;
+  --radius: 2px;
+  --cut: 12px;               /* size of the angled panel corners */
+  --font-display: "Oxanium", "Segoe UI", system-ui, sans-serif;
+  --font-data: "Share Tech Mono", ui-monospace, Consolas, monospace;
+  font-family: "Titillium Web", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   line-height: 1.45;
   color: var(--text);
@@ -36,7 +42,7 @@ h1 { font-size: 1.45rem; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 h2 { font-size: 0.95rem; margin: 0 0 0.6rem; font-weight: 600; }
 p { margin: 0.2rem 0; }
 a { color: var(--accent); cursor: pointer; }
-::selection { background: rgba(57, 135, 229, 0.4); }
+::selection { background: rgba(var(--accent-rgb), 0.4); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -59,7 +65,7 @@ input[type="datetime-local"]::-webkit-calendar-picker-indicator { filter: invert
 button { cursor: pointer; transition: background 0.12s, border-color 0.12s; }
 button:hover:not(:disabled) { background: var(--raised); border-color: var(--border-strong); }
 button:disabled { opacity: 0.45; cursor: default; }
-button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 550; }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 550; }
 button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
 button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
 button.ghost:hover:not(:disabled) { color: var(--text); background: var(--raised); }
@@ -78,7 +84,7 @@ kbd {
 }
 .rail-logo {
   width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; margin-bottom: 14px;
-  background: linear-gradient(135deg, #3987e5, #1c5cab); font-weight: 750; font-size: 0.85rem; letter-spacing: 0.02em;
+  background: linear-gradient(135deg, #4fd8e8, #1d7f8c); color: var(--on-accent); font-weight: 750; font-size: 0.85rem; letter-spacing: 0.02em;
 }
 .rail-btn {
   width: 60px; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 8px 0 6px;
@@ -107,7 +113,7 @@ kbd {
 
 .notice { display: flex; align-items: center; gap: 0.6rem; margin: 1rem 2rem 0; padding: 0.6rem 0.9rem; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border); }
 .page .notice, .dashboard .notice { margin: 0; }
-.notice.bad { background: var(--critical-bg); border-color: rgba(208, 59, 59, 0.4); }
+.notice.bad { background: var(--critical-bg); border-color: rgba(255, 90, 79, 0.4); }
 
 .list { list-style: none; margin: 0; padding: 0; }
 .list li { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.2rem; border-bottom: 1px solid var(--border); }
@@ -120,7 +126,7 @@ kbd {
 .list li:hover .row-action, .row-action:focus-visible { opacity: 1; }
 
 .tag { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 999px; background: var(--panel-2); color: var(--text-2); white-space: nowrap; border: 1px solid var(--border); }
-.tag.critical, .tag.bad { background: var(--critical-bg); border-color: rgba(208, 59, 59, 0.45); color: var(--text); }
+.tag.critical, .tag.bad { background: var(--critical-bg); border-color: rgba(255, 90, 79, 0.45); color: var(--text); }
 .prio { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .prio.p1, .prio-btn.p1 { background: var(--p1); }
 .prio.p2, .prio-btn.p2 { background: var(--p2); }
@@ -129,7 +135,7 @@ kbd {
 .prio-btn:hover:not(:disabled) { transform: scale(1.35); border: none; }
 .prio-btn.p1:hover { background: var(--p1); } .prio-btn.p2:hover { background: var(--p2); } .prio-btn.p3:hover { background: var(--p3); }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.status-dot.warning { background: var(--warning); box-shadow: 0 0 0 3px rgba(250, 178, 25, 0.18); }
+.status-dot.warning { background: var(--warning); box-shadow: 0 0 0 3px rgba(255, 227, 107, 0.18); }
 .status-dot.idle { background: transparent; border: 1.5px solid var(--border-strong); }
 .status-dot.ok { background: var(--good); }
 .status-dot.error { background: var(--critical); }
@@ -147,7 +153,7 @@ kbd {
   display: flex; align-items: center; gap: 0.5rem; background: var(--panel); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 6px 6px 6px 14px; position: relative;
 }
-.command-bar:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(57, 135, 229, 0.18); }
+.command-bar:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18); }
 .command-bar input { flex: 1; border: none; background: transparent; font-size: 1rem; padding: 0.55rem 0.2rem; min-width: 0; }
 .command-bar input:focus-visible { outline: none; }
 .cb-icon { color: var(--muted); flex-shrink: 0; }
@@ -201,7 +207,7 @@ kbd {
 .inline-add input:focus { border-style: solid; background: var(--panel-2); }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chips button { font-size: 0.78rem; padding: 0.18rem 0.6rem; border-radius: 999px; }
-li.fired { background: rgba(250, 178, 25, 0.07); }
+li.fired { background: rgba(255, 227, 107, 0.07); }
 li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem; }
 
 /* Timeline */
@@ -283,7 +289,7 @@ li.fired button:not(.row-action) { font-size: 0.78rem; padding: 0.15rem 0.55rem;
 button.danger { color: var(--p1); }
 .ai-strip { display: flex; gap: 6px; flex-wrap: wrap; }
 .ai-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 0.2rem 0.65rem; border-radius: 999px; color: var(--text-2); }
-.ai-chip.active { color: var(--text); border-color: var(--accent); background: rgba(57, 135, 229, 0.12); }
+.ai-chip.active { color: var(--text); border-color: var(--accent); background: rgba(var(--accent-rgb), 0.12); }
 .console-input input { flex: 1; min-width: 0; }
 .console-output { flex: 1; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-height: 60px; }
 .run-output { white-space: pre-wrap; line-height: 1.5; }
@@ -311,7 +317,7 @@ button.danger { color: var(--p1); }
 .chat-turn { display: flex; flex-direction: column; gap: 0.4rem; }
 .chat-turn.old { opacity: 0.55; }
 .bubble { max-width: min(85%, 720px); padding: 0.55rem 0.75rem; border-radius: 14px; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 0.3rem; }
-.bubble.you { align-self: flex-end; background: rgba(57, 135, 229, 0.16); border-color: rgba(57, 135, 229, 0.4); border-bottom-right-radius: 4px; }
+.bubble.you { align-self: flex-end; background: rgba(var(--accent-rgb), 0.16); border-color: rgba(var(--accent-rgb), 0.4); border-bottom-right-radius: 4px; }
 .bubble.bot { align-self: flex-start; background: var(--panel-2); border-bottom-left-radius: 4px; }
 .bubble.failed { border-color: var(--critical); background: var(--critical-bg); }
 .bubble-text { white-space: pre-wrap; line-height: 1.5; overflow-wrap: anywhere; }
@@ -331,7 +337,7 @@ button.danger { color: var(--p1); }
 .project-tag { display: inline-flex; align-items: center; gap: 0.35rem; }
 
 /* ---------- Inbox page ---------- */
-.tag.accent { background: rgba(57, 135, 229, 0.18); border-color: rgba(57, 135, 229, 0.45); color: var(--text); }
+.tag.accent { background: rgba(var(--accent-rgb), 0.18); border-color: rgba(var(--accent-rgb), 0.45); color: var(--text); }
 .summary { white-space: pre-wrap; line-height: 1.6; }
 .stack.tight { gap: 0.35rem; }
 .nowrap { white-space: nowrap; }
@@ -458,7 +464,7 @@ label.conn-head { flex-direction: row; cursor: pointer; font-size: inherit; }
 .alert-list li + li { border-top: 1px solid var(--border); }
 .alert-title { font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
 .chips-label { font-size: 0.78rem; color: var(--muted); align-self: center; margin-right: 2px; }
-.chips button.active { border-color: var(--accent); background: rgba(57, 135, 229, 0.18); }
+.chips button.active { border-color: var(--accent); background: rgba(var(--accent-rgb), 0.18); }
 .alert-actions { display: flex; justify-content: flex-end; }
 /* While a time is being edited, the picker gets its own line so the title stays readable. */
 .list li:has(> .time-edit) { flex-wrap: wrap; }
@@ -494,3 +500,72 @@ label.conn-head { flex-direction: row; cursor: pointer; font-size: inherit; }
 .pomo-btn:hover:not(:disabled) { color: var(--text); background: var(--raised); border: none; }
 .pomo-actions { gap: 0.4rem; flex-wrap: wrap; }
 .seconds-input { width: 6em; }
+
+/* ---------- HUD styling: angular panels, holo type, glow ---------- */
+.angled, .widget, .card, .kpi, .modal, .palette, .command-bar {
+  clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+}
+/* The panel frame is drawn with background images; !important keeps a button's hover shorthand from wiping it. */
+/* Timeline popovers reach outside the widget, so that one keeps square corners. */
+.widget:has(.timeline) { clip-path: none; }
+.widget, .card, .kpi, .modal, .palette, .command-bar {
+  position: relative;
+  border-color: var(--border);
+  background-image:
+    linear-gradient(var(--accent), var(--accent)), linear-gradient(var(--accent), var(--accent)),
+    linear-gradient(var(--border-strong), var(--border-strong)), linear-gradient(var(--border-strong), var(--border-strong)),
+    linear-gradient(135deg, transparent calc(var(--cut) * 0.7 - 1px), var(--accent) calc(var(--cut) * 0.7 - 1px), var(--accent) calc(var(--cut) * 0.7), transparent calc(var(--cut) * 0.7)),
+    linear-gradient(-45deg, transparent calc(var(--cut) * 0.7 - 1px), var(--border-strong) calc(var(--cut) * 0.7 - 1px), var(--border-strong) calc(var(--cut) * 0.7), transparent calc(var(--cut) * 0.7)) !important;
+  background-size: 36% 1px, 36% 1px, 1px 38%, 1px 38%, 100% 100%, 100% 100% !important;
+  background-position: var(--cut) 0, calc(100% - var(--cut)) 100%, 100% 0, 0 100%, 0 0, 0 0 !important;
+  background-repeat: no-repeat !important;
+}
+h1, h2, .widget-head h2, .conn-group-title, .palette [cmdk-group-heading], .pomo-phase {
+  font-family: var(--font-display);
+}
+h1 { font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); text-shadow: var(--glow); }
+.widget-head h2, .card > h2 {
+  font-weight: 600; font-size: 0.8rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent);
+}
+.drag-handle h2 { color: var(--accent); }
+.kpi-value, .hero-value, .pomo-time { font-family: var(--font-display); color: var(--accent); text-shadow: var(--glow); }
+.kpi-label { font-family: var(--font-display); text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.68rem; }
+.tl-hour span, .bar-label, .bubble-meta, .tag, .cb-flash, .tab-count, .device-code, .step-from, .email-meta, kbd, .sub {
+  font-family: var(--font-data);
+}
+button, input, select, textarea { border-radius: var(--radius); }
+button.primary { font-family: var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; box-shadow: var(--glow); }
+.tag, .ai-chip, .hist, .chips button, .target-chip, .cb-flash, .tl-now span { border-radius: 0; }
+.tag { text-transform: uppercase; letter-spacing: 0.04em; background: transparent; border-color: currentColor; color: var(--text-2); }
+.tag.accent { color: var(--accent); background: transparent; }
+.tag.critical, .tag.bad { color: var(--critical); background: transparent; border-color: currentColor; }
+/* Diamond checkboxes, like the panel corners. */
+input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none; border: 1px solid var(--accent); background: transparent;
+  transform: rotate(45deg) scale(0.8); cursor: pointer; flex-shrink: 0; border-radius: 0;
+}
+input[type="checkbox"]:checked { background: var(--accent); box-shadow: var(--glow); }
+.list li.in-project input[type="checkbox"] { border-color: var(--proj); }
+.list li.in-project input[type="checkbox"]:checked { background: var(--proj); }
+.prio, .prio-btn, .status-dot, .pomo-dot, .mk.reminder, .tl-item.reminder { border-radius: 0; transform: rotate(45deg); }
+.prio-btn:hover:not(:disabled) { transform: rotate(45deg) scale(1.35); }
+.tl-item.reminder { transform: translateX(-50%) rotate(45deg); }
+.tl-item.reminder .tl-tip { transform: translateX(-50%) rotate(-45deg); transform-origin: center; }
+.status-dot.ok { box-shadow: 0 0 6px var(--good); }
+.status-dot.error { box-shadow: 0 0 6px var(--critical); }
+.bar { border-radius: 0; box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.35); }
+.tl-now { background: var(--accent); box-shadow: var(--glow); }
+.tl-now span { background: var(--accent); color: var(--on-accent); font-family: var(--font-data); }
+.rail { background: #02080a; }
+.rail-logo { border-radius: 0; clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); font-family: var(--font-display); }
+.rail-btn { border-radius: 0; font-family: var(--font-display); letter-spacing: 0.06em; text-transform: uppercase; font-size: 0.6rem; }
+.rail-btn.active { color: var(--accent); background: rgba(var(--accent-rgb), 0.08); box-shadow: inset 2px 0 0 var(--accent); }
+.bubble { border-radius: 0; }
+.bubble.you { border-bottom-right-radius: 0; }
+.bubble.bot { border-bottom-left-radius: 0; }
+.console-output, .chat-thread, .conn-row, .email-card, .notice, .tabs, .tab, .tl-pop, .tl-tip, .bar-tip { border-radius: 0; }
+.command-bar:focus-within { box-shadow: 0 0 14px rgba(var(--accent-rgb), 0.25); }
+.react-grid-item.react-grid-placeholder { border-radius: 0; }
+.topbar { border-radius: 0; font-family: var(--font-data); }
+::selection { background: rgba(var(--accent-rgb), 0.35); }
+::-webkit-scrollbar-thumb { border-radius: 0; }
