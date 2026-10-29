@@ -581,7 +581,7 @@ body {
     repeating-linear-gradient(60deg, rgba(98, 200, 255, 0.03) 0 1px, transparent 1px 34px),
     repeating-linear-gradient(120deg, rgba(98, 200, 255, 0.03) 0 1px, transparent 1px 34px),
     linear-gradient(90deg, rgba(3, 8, 16, 0.55), rgba(3, 8, 16, 0.25) 60%, rgba(3, 8, 16, 0.45)),
-    url("/backdrop.webp") center 72% / cover no-repeat,
+    url("/backdrop.webp") center 60% / cover no-repeat,
     radial-gradient(1200px 700px at 70% -10%, rgba(40, 120, 200, 0.28), transparent 70%),
     radial-gradient(900px 600px at 0% 110%, rgba(20, 80, 150, 0.22), transparent 70%),
     var(--bg);
