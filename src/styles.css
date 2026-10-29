@@ -572,12 +572,16 @@ input[type="checkbox"]:checked { background: var(--accent); box-shadow: var(--gl
 ::selection { background: rgba(var(--accent-rgb), 0.35); }
 ::-webkit-scrollbar-thumb { border-radius: 0; }
 
-/* Backdrop the see-through panels sit on: deep-space glow plus a faint triangular energy grid. */
+/* Backdrop the see-through panels sit on: optional background art (public/backdrop.webp, kept out of
+   git), darkened for readability, under a faint triangular energy grid. Without the art the grid and
+   a deep-space glow still show. */
 body {
   background:
-    repeating-linear-gradient(0deg, rgba(98, 200, 255, 0.035) 0 1px, transparent 1px 34px),
-    repeating-linear-gradient(60deg, rgba(98, 200, 255, 0.035) 0 1px, transparent 1px 34px),
-    repeating-linear-gradient(120deg, rgba(98, 200, 255, 0.035) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(0deg, rgba(98, 200, 255, 0.03) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(60deg, rgba(98, 200, 255, 0.03) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(120deg, rgba(98, 200, 255, 0.03) 0 1px, transparent 1px 34px),
+    linear-gradient(90deg, rgba(3, 8, 16, 0.55), rgba(3, 8, 16, 0.25) 60%, rgba(3, 8, 16, 0.45)),
+    url("/backdrop.webp") center 72% / cover no-repeat,
     radial-gradient(1200px 700px at 70% -10%, rgba(40, 120, 200, 0.28), transparent 70%),
     radial-gradient(900px 600px at 0% 110%, rgba(20, 80, 150, 0.22), transparent 70%),
     var(--bg);
