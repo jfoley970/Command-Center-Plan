@@ -29,3 +29,7 @@ dist-ssr
 # Server deployment: filled-in settings and the secret key never go in git
 /deploy/.env
 /deploy/secrets/
+
+# Background art is dropped in per install (public/backdrop.webp); it is not ours to publish.
+/public/*
+!/public/.gitkeep

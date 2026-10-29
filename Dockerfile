@@ -8,6 +8,8 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY index.html tsconfig.json tsconfig.node.json vite.config.ts ./
 COPY src ./src
+# public/ holds optional per-install files such as the background art (public/backdrop.webp).
+COPY public ./public
 RUN npm run build
 
 FROM rust:1-bookworm AS server
