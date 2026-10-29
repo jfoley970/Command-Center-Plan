@@ -1,20 +1,22 @@
-/* Dark theme only, styled after a sci-fi helmet HUD: teal holo panels with angular cut corners.
+/* Dark theme only, styled after the Halo CE / Halo 2 helmet HUD: see-through blue holo panels
+   with angular cut corners over a faint energy-grid backdrop.
    Fonts are bundled (@fontsource) so the desktop app works offline. */
 :root {
   color-scheme: dark;
-  --bg: #040b0e;
-  --panel: #0a1a20;
-  --panel-2: #0f242b;
-  --raised: #143039;
-  --border: #173a44;
-  --border-strong: #2a6470;
-  --text: #d6fbff;
-  --text-2: #a7d4da;
-  --muted: #6f9ea6;
-  --accent: #4fd8e8;         /* series 1 (holo teal): reminders, bars, primary actions */
-  --accent-hover: #7aeaf6;
-  --accent-rgb: 79, 216, 232;
-  --on-accent: #031014;
+  --bg: #030810;
+  --panel: rgba(12, 38, 62, 0.34);      /* see-through: the backdrop shows behind panels */
+  --panel-2: rgba(40, 110, 170, 0.14);
+  --raised: rgba(18, 52, 82, 0.94);     /* popovers stay nearly solid so they read over panels */
+  --border: rgba(98, 200, 255, 0.18);
+  --border-strong: rgba(98, 200, 255, 0.42);
+  --text: #e2f5ff;
+  --text-2: #a9cfe6;
+  --muted: #7a9fb8;
+  --accent: #62c8ff;         /* series 1 (HUD blue): reminders, bars, primary actions */
+  --accent-hover: #8fd8ff;
+  --accent-rgb: 98, 200, 255;
+  --on-accent: #021020;
+  --solid-panel: rgba(8, 26, 44, 0.9);   /* modals and the quick-action palette */
   --glow: 0 0 10px rgba(var(--accent-rgb), 0.45);
   --series-2: #f2a03d;       /* series 2 (amber): todos due */
   --critical: #ff5a4f;       /* status: overdue, errors */
@@ -22,8 +24,8 @@
   --warning: #ffe36b;        /* status: reminder just fired */
   --good: #3fd97a;
   --p1: #ff5a4f;
-  --p2: #4fd8e8;
-  --p3: #4a6c73;
+  --p2: #62c8ff;
+  --p3: #4b6a82;
   --radius: 2px;
   --cut: 12px;               /* size of the angled panel corners */
   --font-display: "Oxanium", "Segoe UI", system-ui, sans-serif;
@@ -84,7 +86,7 @@ kbd {
 }
 .rail-logo {
   width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; margin-bottom: 14px;
-  background: linear-gradient(135deg, #4fd8e8, #1d7f8c); color: var(--on-accent); font-weight: 750; font-size: 0.85rem; letter-spacing: 0.02em;
+  background: linear-gradient(135deg, #62c8ff, #1f6fae); color: var(--on-accent); font-weight: 750; font-size: 0.85rem; letter-spacing: 0.02em;
 }
 .rail-btn {
   width: 60px; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 8px 0 6px;
@@ -556,7 +558,7 @@ input[type="checkbox"]:checked { background: var(--accent); box-shadow: var(--gl
 .bar { border-radius: 0; box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.35); }
 .tl-now { background: var(--accent); box-shadow: var(--glow); }
 .tl-now span { background: var(--accent); color: var(--on-accent); font-family: var(--font-data); }
-.rail { background: #02080a; }
+.rail { background: rgba(2, 8, 16, 0.55); backdrop-filter: blur(6px); border-right-color: var(--border); }
 .rail-logo { border-radius: 0; clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px); font-family: var(--font-display); }
 .rail-btn { border-radius: 0; font-family: var(--font-display); letter-spacing: 0.06em; text-transform: uppercase; font-size: 0.6rem; }
 .rail-btn.active { color: var(--accent); background: rgba(var(--accent-rgb), 0.08); box-shadow: inset 2px 0 0 var(--accent); }
@@ -569,3 +571,21 @@ input[type="checkbox"]:checked { background: var(--accent); box-shadow: var(--gl
 .topbar { border-radius: 0; font-family: var(--font-data); }
 ::selection { background: rgba(var(--accent-rgb), 0.35); }
 ::-webkit-scrollbar-thumb { border-radius: 0; }
+
+/* Backdrop the see-through panels sit on: deep-space glow plus a faint triangular energy grid. */
+body {
+  background:
+    repeating-linear-gradient(0deg, rgba(98, 200, 255, 0.035) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(60deg, rgba(98, 200, 255, 0.035) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(120deg, rgba(98, 200, 255, 0.035) 0 1px, transparent 1px 34px),
+    radial-gradient(1200px 700px at 70% -10%, rgba(40, 120, 200, 0.28), transparent 70%),
+    radial-gradient(900px 600px at 0% 110%, rgba(20, 80, 150, 0.22), transparent 70%),
+    var(--bg);
+  background-attachment: fixed;
+}
+.widget, .card, .kpi, .command-bar { background-color: var(--panel); backdrop-filter: blur(4px); }
+.modal, .palette { background-color: var(--solid-panel); backdrop-filter: blur(10px); }
+.console-output, .chat-thread { background: rgba(2, 8, 16, 0.45); }
+.tl-item { border-color: var(--bg); }
+.tl-item.reminder.past { background: color-mix(in srgb, var(--accent) 40%, var(--bg)); }
+.tl-item.todo.past { background: color-mix(in srgb, var(--series-2) 40%, var(--bg)); }
