@@ -8,7 +8,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY index.html tsconfig.json tsconfig.node.json vite.config.ts ./
 COPY src ./src
-# public/ holds optional per-install files such as the background art (public/backdrop.webp).
+# public/ holds static files served as-is, such as the background art.
 COPY public ./public
 RUN npm run build
 
