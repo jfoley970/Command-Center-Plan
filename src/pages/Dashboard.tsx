@@ -152,7 +152,7 @@ export default function Dashboard({ go }: { go: (p: Page) => void }) {
     <div className="dashboard">
       <header className="dash-head">
         <div>
-          <h1>{greeting(now)}, James</h1>
+          <h1>{greeting(now)}, Master Chief</h1>
           <p className="muted">
             {now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })} ·{" "}
             {now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}

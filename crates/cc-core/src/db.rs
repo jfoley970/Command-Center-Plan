@@ -240,7 +240,7 @@ fn seed_default_agent(conn: &Connection) -> rusqlite::Result<()> {
             params![
                 "Daily Planner",
                 "Turns your open todos and reminders into a plan for the day.",
-                "You are James's daily planning assistant. Given his open todos and upcoming reminders, \
+                "You are Master Chief's daily planning assistant. Given his open todos and upcoming reminders, \
                  produce a short, prioritized plan for today: the three most important items first, \
                  then everything else grouped by when to do it. Be concise and practical.",
                 crate::claude::DEFAULT_MODEL,

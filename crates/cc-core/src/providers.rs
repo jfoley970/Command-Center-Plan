@@ -116,7 +116,7 @@ pub fn quick_agent(p: &Provider) -> crate::db::AgentInput {
         id: None,
         name: p.name.to_string(),
         description: format!("Ask {} anything from the dashboard.", p.name),
-        system_prompt: "You are a helpful assistant answering James from his command center dashboard. \
+        system_prompt: "You are a helpful assistant answering Master Chief (address him that way) from his command center dashboard. \
                         Be concise and practical."
             .into(),
         model: p.models.first().map(|m| m.0).unwrap_or_default().to_string(),
