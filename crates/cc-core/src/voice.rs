@@ -68,7 +68,8 @@ pub async fn handle_text(core: &Arc<Core>, text: &str, fallback: Fallback) -> Re
         "todo" if !p.sure => match (fallback.agent_id, fallback.provider.as_deref()) {
             (Some(id), _) => commands::run_agent(core, id, said.clone(), "voice").await?,
             (None, Some(provider)) => commands::ask_provider(core, provider, said.clone(), "voice").await?,
-            (None, None) => return Err("Say who should answer, such as \"Claude, ...\".".into()),
+            // Nobody on screen: Local AI can answer, or add the todo itself.
+            (None, None) => commands::ask_provider(core, "local", said.clone(), "voice").await?,
         },
         _ => {
             let kind = p.kind.clone();
@@ -101,9 +102,10 @@ mod tests {
         // The wake phrase may lead.
         let h = handle_text(&core, "Command Center, remind me at 3 PM to call Dana", Fallback::default()).await.unwrap();
         assert_eq!(h.kind, "reminder");
-        // A question with nobody named and nobody on screen can't go anywhere.
-        let e = handle_text(&core, "What's the tallest mountain in Colorado?", Fallback::default()).await.unwrap_err();
-        assert!(e.contains("Say who should answer"));
+        // A question with nobody named and nobody on screen goes to Local AI
+        // (not running here, so the run says so).
+        let e = handle_text(&core, "What's the tallest mountain in Colorado?", Fallback::default()).await;
+        assert!(e.as_ref().is_err_and(|e| !e.contains("Say who should answer")) || e.as_ref().is_ok_and(|h| h.run.is_some()), "{e:?}");
         // Named AIs are asked; without a key the run says what's missing.
         let e = handle_text(&core, "Grok, what's new?", Fallback::default()).await.unwrap_err();
         assert!(e.contains("Grok key"), "{e}");
