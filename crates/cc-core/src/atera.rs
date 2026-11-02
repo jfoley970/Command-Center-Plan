@@ -1,6 +1,9 @@
-//! Read-only Atera RMM alerts. The backend polls the REST API (Atera only sends
+//! Atera RMM alerts. The backend polls the REST API (Atera only sends
 //! webhooks for tickets, and only on higher plans), keeps the latest list in memory,
 //! and pops an OS notification for new critical alerts.
+//!
+//! Two changes can be made, only ever after the user approves them in the app
+//! (Local AI's approval queue): resolving an alert and creating a ticket.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,7 @@ use crate::secrets::{Secrets, ATERA_KEY};
 use crate::Core;
 
 const API_URL: &str = "https://app.atera.com/api/v3/alerts";
+const TICKETS_URL: &str = "https://app.atera.com/api/v3/tickets";
 /// Atera caps a page at 50 items.
 const PAGE_SIZE: u32 = 50;
 /// Enough for any realistic open-alert backlog while staying far under the rate limit.
@@ -269,6 +273,82 @@ pub async fn refresh(core: &Core) -> Result<Snapshot, String> {
     }
     core.changed("atera-changed");
     state.snapshot(&core.secrets)
+}
+
+// ---------- Changes (each one approved by the user first) ----------
+
+async fn send(key: &str, req: reqwest::RequestBuilder) -> Result<String, String> {
+    let res = req
+        .header("X-API-KEY", key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach Atera: {e}"))?;
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err("Atera refused the change. The API key may not be allowed to make changes.".into());
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err("Atera doesn't know that item any more; it may already be resolved or closed.".into());
+    }
+    if !status.is_success() {
+        let detail: String = body.chars().take(200).collect();
+        return Err(format!("Atera returned {status}{}", if detail.trim().is_empty() { String::new() } else { format!(": {detail}") }));
+    }
+    Ok(body)
+}
+
+fn key(core: &Core) -> Result<String, String> {
+    core.secrets.get(ATERA_KEY)?.ok_or_else(|| "Atera isn't connected.".to_string())
+}
+
+/// Marks an alert resolved in Atera and drops it from the list here.
+pub async fn resolve_alert(core: &Core, id: i64) -> Result<String, String> {
+    let key = key(core)?;
+    send(&key, reqwest::Client::new().put(format!("{API_URL}/{id}"))).await?;
+    core.atera.inner.lock().unwrap().all.retain(|a| a.id != id);
+    core.changed("atera-changed");
+    Ok(format!("Alert #{id} resolved in Atera."))
+}
+
+/// What a new ticket says. Atera's own field names.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct NewTicket {
+    #[serde(rename = "TicketTitle")]
+    pub title: String,
+    #[serde(rename = "Description")]
+    pub description: String,
+    /// "Low", "Medium", "High" or "Critical".
+    #[serde(rename = "TicketPriority")]
+    pub priority: String,
+    #[serde(rename = "EndUserEmail", skip_serializing_if = "Option::is_none")]
+    pub end_user_email: Option<String>,
+}
+
+/// Opens a ticket in Atera. Returns what to tell the user, with the new
+/// ticket's number when Atera sends it back.
+pub async fn create_ticket(core: &Core, t: &NewTicket) -> Result<String, String> {
+    let key = key(core)?;
+    let body = send(&key, reqwest::Client::new().post(TICKETS_URL).json(t)).await?;
+    let id = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("ActionID").or_else(|| v.get("TicketID")).and_then(|x| x.as_i64()));
+    Ok(match id {
+        Some(id) => format!("Ticket #{id} created in Atera: {}", t.title),
+        None => format!("Ticket created in Atera: {}", t.title),
+    })
+}
+
+/// Puts alerts in the list without asking Atera, for tests elsewhere.
+#[cfg(test)]
+pub fn set_alerts(core: &Core, alerts: Vec<Alert>) {
+    core.atera.inner.lock().unwrap().all = alerts;
+}
+
+/// The alert with this id, if it is in the current list (hidden customers included).
+pub fn find_alert(core: &Core, id: i64) -> Option<Alert> {
+    core.atera.inner.lock().unwrap().all.iter().find(|a| a.id == id).cloned()
 }
 
 pub async fn poll_loop(core: Arc<Core>) {
