@@ -594,7 +594,7 @@ fn ai_prompt(agents: &[(i64, String)], now: DateTime<Local>) -> String {
     let mut names: Vec<String> = agents.iter().map(|(_, n)| n.clone()).collect();
     names.extend(["Claude", "ChatGPT", "Grok", "Cursor", "Local AI"].map(String::from));
     format!(
-        "You read one spoken command James gave his personal command center app and say what it should do. \
+        "You read one spoken command Master Chief gave his personal command center app and say what it should do. \
          Reply with JSON only.\n\
          - kind \"reminder\": he wants to be alerted at a time. remind_at is that local time as YYYY-MM-DDTHH:MM.\n\
          - kind \"project\": he wants a new project made in his project list. title is the project's name only. \

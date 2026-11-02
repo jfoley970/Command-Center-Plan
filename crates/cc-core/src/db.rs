@@ -229,8 +229,28 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute_batch(&format!("ALTER TABLE agent_runs ADD COLUMN {column} {def}"))?;
         }
     }
+    for (old, new) in RENAMED_PROMPTS {
+        conn.execute("UPDATE agents SET system_prompt = ?2 WHERE system_prompt = ?1", params![old, new])?;
+    }
     Ok(())
 }
+
+const DAILY_PLANNER_PROMPT: &str = "You are Master Chief's daily planning assistant. Given his open todos and upcoming \
+     reminders, produce a short, prioritized plan for today: the three most important items first, then \
+     everything else grouped by when to do it. Be concise and practical.";
+
+/// Default agent prompts from before the user asked to be called Master Chief, with their new text.
+/// Only prompts still exactly as shipped are rewritten, so an edited prompt is left alone.
+const RENAMED_PROMPTS: [(&str, &str); 2] = [
+    (
+        "You are James's daily planning assistant. Given his open todos and upcoming reminders, produce a short, prioritized plan for today: the three most important items first, then everything else grouped by when to do it. Be concise and practical.",
+        DAILY_PLANNER_PROMPT,
+    ),
+    (
+        "You are a helpful assistant answering James from his command center dashboard. Be concise and practical.",
+        "You are a helpful assistant answering Master Chief (address him that way) from his command center dashboard. Be concise and practical.",
+    ),
+];
 
 fn seed_default_agent(conn: &Connection) -> rusqlite::Result<()> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))?;
@@ -240,9 +260,7 @@ fn seed_default_agent(conn: &Connection) -> rusqlite::Result<()> {
             params![
                 "Daily Planner",
                 "Turns your open todos and reminders into a plan for the day.",
-                "You are James's daily planning assistant. Given his open todos and upcoming reminders, \
-                 produce a short, prioritized plan for today: the three most important items first, \
-                 then everything else grouped by when to do it. Be concise and practical.",
+                DAILY_PLANNER_PROMPT,
                 crate::claude::DEFAULT_MODEL,
                 now()
             ],
@@ -1726,6 +1744,23 @@ mod tests {
         assert!(get_agent(&c, a).unwrap().unwrap().chat_since.is_some());
         let later = start_run(&c, a, "five", "app").unwrap();
         assert!(chat_history(&c, a, later, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn renames_shipped_prompts_only() {
+        let c = mem();
+        let planner = list_agents(&c).unwrap()[0].id;
+        assert_eq!(list_agents(&c).unwrap()[0].system_prompt, DAILY_PLANNER_PROMPT);
+        c.execute("UPDATE agents SET system_prompt = ?1 WHERE id = ?2", params![RENAMED_PROMPTS[0].0, planner]).unwrap();
+        c.execute(
+            "INSERT INTO agents (name, description, system_prompt, model, created_at) VALUES ('Mine', '', 'James likes short answers.', 'm', '')",
+            [],
+        )
+        .unwrap();
+        migrate(&c).unwrap();
+        let prompts: Vec<String> = list_agents(&c).unwrap().into_iter().map(|a| a.system_prompt).collect();
+        assert!(prompts.contains(&DAILY_PLANNER_PROMPT.to_string()));
+        assert!(prompts.contains(&"James likes short answers.".to_string()));
     }
 
     #[test]
