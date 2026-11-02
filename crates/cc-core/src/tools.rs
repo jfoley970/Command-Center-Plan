@@ -114,16 +114,17 @@ pub const TOOLS: &[Tool] = &[
         name: "update_todo",
         group: "todos",
         tier: Tier::Do,
-        description: "Mark a todo done or not done, change its priority, or replace its notes. Get the id from list_todos.",
+        description: "Mark a todo done or not done, change its priority, or replace its notes. Name it by id (from list_todos) or by title.",
         params: || {
             (
                 json!({
                     "id": { "type": "integer" },
+                    "title": { "type": "string", "description": "The todo's title, or part of it, when you don't have its id" },
                     "done": { "type": "boolean" },
                     "priority": { "type": "string", "enum": ["high", "normal", "low"] },
                     "notes": { "type": "string" }
                 }),
-                &["id"],
+                &[],
             )
         },
     },
@@ -154,15 +155,16 @@ pub const TOOLS: &[Tool] = &[
         name: "move_reminder",
         group: "reminders",
         tier: Tier::Do,
-        description: "Snooze a reminder by some minutes, or move it to a new time. Get the id from list_reminders.",
+        description: "Snooze a reminder by some minutes, or move it to a new time. Name it by id (from list_reminders) or by title.",
         params: || {
             (
                 json!({
                     "id": { "type": "integer" },
+                    "title": { "type": "string", "description": "The reminder's title, or part of it, when you don't have its id" },
                     "snooze_minutes": { "type": "integer" },
                     "when": { "type": "string", "description": WHEN }
                 }),
-                &["id"],
+                &[],
             )
         },
     },
@@ -266,15 +268,15 @@ pub const TOOLS: &[Tool] = &[
         name: "delete_todo",
         group: "todos",
         tier: Tier::Ask,
-        description: "Delete a todo for good. Waits for the user's approval. To finish one, use update_todo with done instead.",
-        params: || (json!({ "id": { "type": "integer" } }), &["id"]),
+        description: "Delete a todo for good. Name it by id (from list_todos) or by title. Waits for the user's approval. To finish one, use update_todo with done instead.",
+        params: || (json!({ "id": { "type": "integer" }, "title": { "type": "string", "description": "The todo's title, or part of it" } }), &[]),
     },
     Tool {
         name: "delete_reminder",
         group: "reminders",
         tier: Tier::Ask,
-        description: "Delete a reminder. Waits for the user's approval.",
-        params: || (json!({ "id": { "type": "integer" } }), &["id"]),
+        description: "Delete a reminder. Name it by id (from list_reminders) or by title. Waits for the user's approval.",
+        params: || (json!({ "id": { "type": "integer" }, "title": { "type": "string", "description": "The reminder's title, or part of it" } }), &[]),
     },
     Tool {
         name: "delete_project",
@@ -517,6 +519,76 @@ fn project_id(core: &Arc<Core>, name: Option<String>) -> Result<Option<i64>, Str
         })
 }
 
+/// Finds one item by `id`, or else by `title` (whole title first, then a part
+/// of it). Small models guess ids, so a wrong id with a title falls back to
+/// the title, and a wrong id alone says how to look it up. More than one
+/// match is an error that lists them, so the model asks rather than picks.
+fn find_one<T: Clone>(items: &[T], a: &Value, what: &str, list_tool: &str, id_of: fn(&T) -> i64, title_of: fn(&T) -> &str) -> Result<T, String> {
+    if let Some(id) = int(a, "id") {
+        if let Some(found) = items.iter().find(|i| id_of(i) == id) {
+            return Ok(found.clone());
+        }
+        if s(a, "title").is_none() {
+            return Err(format!("There's no {what} #{id}. Call {list_tool} to get the right id, or pass its title instead."));
+        }
+    }
+    let want = s(a, "title").ok_or_else(|| format!("Which {what}? Pass its id from {list_tool}, or its title."))?.to_lowercase();
+    let exact: Vec<&T> = items.iter().filter(|i| title_of(i).to_lowercase() == want).collect();
+    let matches: Vec<&T> = if exact.is_empty() { items.iter().filter(|i| title_of(i).to_lowercase().contains(&want)).collect() } else { exact };
+    match matches.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!("No {what} matches \"{want}\". Call {list_tool} to see them.")),
+        many => Err(format!(
+            "More than one {what} matches \"{want}\": {}. Ask the user which one, or pass its id.",
+            many.iter().take(8).map(|i| format!("#{} {}", id_of(i), title_of(i))).collect::<Vec<_>>().join("; ")
+        )),
+    }
+}
+
+/// A todo named by id or title, preferring open ones when matching by title.
+fn find_todo(core: &Arc<Core>, a: &Value) -> Result<db::Todo, String> {
+    let all = db::list_todos(&core.db.0.lock().unwrap()).map_err(|e| e.to_string())?;
+    let open: Vec<db::Todo> = all.iter().filter(|t| !t.done).cloned().collect();
+    let pick = |items: &[db::Todo]| find_one(items, a, "todo", "list_todos", |t| t.id, |t| t.title.as_str());
+    match pick(&open) {
+        Ok(t) => Ok(t),
+        // A done todo can still be reopened or deleted, by id or by title.
+        Err(_) => pick(&all),
+    }
+}
+
+fn find_reminder(core: &Arc<Core>, a: &Value) -> Result<db::Reminder, String> {
+    let all: Vec<db::Reminder> = db::list_reminders(&core.db.0.lock().unwrap()).map_err(|e| e.to_string())?.into_iter().filter(|r| !r.fired).collect();
+    find_one(&all, a, "reminder", "list_reminders", |r| r.id, |r| r.title.as_str())
+}
+
+/// Words that mean the user wants something changed, not just looked at.
+const CHANGE_WORDS: &[&str] = &[
+    "add ", "create", "make ", "new todo", "new reminder", "mark", "tick", "check off", "complete", "finish", "reopen",
+    "delete", "remove", "get rid", "cancel", "snooze", "move", "reschedule", "push ", "postpone", "remind me", "set a",
+    "set the", "change", "rename", "update", "priority", "start", "pause", "resume", "reset", "stop", "send", "reply", "email ",
+    "ask grok", "ask chatgpt", "ask claude", "have cursor", "tell cursor",
+];
+
+/// Whether a message asks for a change. Used to catch an answer that claims a
+/// change when no tool made one.
+pub fn wants_change(input: &str) -> bool {
+    let t = format!(" {} ", input.to_lowercase());
+    CHANGE_WORDS.iter().any(|w| t.contains(w))
+}
+
+/// Whether a group was picked because the message (or chat) is about it, not
+/// as the fallback. When one was, the model should look before answering.
+pub fn about_data(input: &str, recent: &str) -> bool {
+    let text = format!("{} {}", input, recent).to_lowercase();
+    GROUP_WORDS.iter().any(|(_, words)| words.iter().any(|w| text.contains(w)))
+}
+
+/// A tool call that changed something or queued a change, and worked.
+pub fn changed(used: &[Used]) -> bool {
+    used.iter().any(|u| u.ok && find(&u.tool).is_some_and(|t| t.tier != Tier::Look))
+}
+
 // ---------- Running ----------
 
 /// Runs one tool call. Returns what the model reads back and what the user
@@ -546,19 +618,14 @@ pub async fn run(core: &Arc<Core>, ctx: Ctx, name: &str, a: &Value) -> (String, 
 /// approval queue (`mail::change_mail` queues every send and delete); the rest
 /// into `tool_approvals`, run by `commands::approve_tool`. Returns the summary.
 async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<String, String> {
-    let todo_title = |id: i64| -> Result<String, String> {
-        db::list_todos(&core.db.0.lock().unwrap()).map_err(|e| e.to_string())?.into_iter().find(|t| t.id == id).map(|t| t.title).ok_or_else(|| format!("There's no todo #{id}."))
-    };
     let (args, summary) = match tool.name {
         "delete_todo" => {
-            let id = int(a, "id").ok_or("Which todo? Pass its id from list_todos.")?;
-            (json!({ "id": id }), format!("Delete todo “{}”", todo_title(id)?))
+            let todo = find_todo(core, a)?;
+            (json!({ "id": todo.id }), format!("Delete todo #{} “{}”", todo.id, todo.title))
         }
         "delete_reminder" => {
-            let id = int(a, "id").ok_or("Which reminder? Pass its id from list_reminders.")?;
-            let r = db::list_reminders(&core.db.0.lock().unwrap()).map_err(|e| e.to_string())?.into_iter().find(|r| r.id == id);
-            let r = r.ok_or_else(|| format!("There's no reminder #{id}."))?;
-            (json!({ "id": id }), format!("Delete reminder “{}” ({})", r.title, local(&r.remind_at)))
+            let r = find_reminder(core, a)?;
+            (json!({ "id": r.id }), format!("Delete reminder “{}” ({})", r.title, local(&r.remind_at)))
         }
         "delete_project" => {
             let id = project_id(core, s(a, "name"))?.ok_or("Which project? Pass its name.")?;
@@ -672,9 +739,8 @@ async fn exec(core: &Arc<Core>, tool: &Tool, a: &Value) -> Result<(String, Strin
             Ok((format!("Added todo #{}: {}", t.id, t.title), format!("Added todo “{}”", t.title)))
         }
         "update_todo" => {
-            let id = int(a, "id").ok_or("Which todo? Pass its id from list_todos.")?;
-            let todo = db::list_todos(&core.db.0.lock().unwrap()).map_err(|e| e.to_string())?.into_iter().find(|t| t.id == id);
-            let todo = todo.ok_or_else(|| format!("There's no todo #{id}."))?;
+            let todo = find_todo(core, a)?;
+            let id = todo.id;
             let mut did = vec![];
             if let Some(done) = boolean(a, "done") {
                 call("set_todo_done", json!({ "id": id, "done": done })).await?;
@@ -719,13 +785,8 @@ async fn exec(core: &Arc<Core>, tool: &Tool, a: &Value) -> Result<(String, Strin
             Ok((format!("Reminder #{} \"{}\" set for {at}.", r.id, r.title), format!("Set reminder “{}” for {at}", r.title)))
         }
         "move_reminder" => {
-            let id = int(a, "id").ok_or("Which reminder? Pass its id from list_reminders.")?;
-            let title = db::list_reminders(&core.db.0.lock().unwrap())
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .find(|r| r.id == id)
-                .map(|r| r.title)
-                .ok_or_else(|| format!("There's no reminder #{id}."))?;
+            let r = find_reminder(core, a)?;
+            let (id, title) = (r.id, r.title);
             if let Some(when) = s(a, "when") {
                 let r: db::Reminder =
                     serde_json::from_value(call("reschedule_reminder", json!({ "id": id, "remindAt": parse_when(&when)? })).await?)
@@ -1113,6 +1174,36 @@ mod tests {
             let risky = ["delete", "send", "reply", "ask_ai", "cursor"].iter().any(|w| t.name.contains(w));
             assert_eq!(risky, t.tier == Tier::Ask, "{} has the wrong tier", t.name);
         }
+    }
+
+    #[test]
+    fn items_are_found_by_id_or_title() {
+        #[derive(Clone, Debug, PartialEq)]
+        struct I(i64, &'static str);
+        let items = [I(3, "Call Dell"), I(7, "Test Local AI tools"), I(9, "Test backups")];
+        let f = |a: Value| find_one(&items, &a, "todo", "list_todos", |i| i.0, |i| i.1);
+        assert_eq!(f(json!({ "id": 7 })).unwrap().0, 7);
+        assert_eq!(f(json!({ "title": "test local ai tools" })).unwrap().0, 7);
+        assert_eq!(f(json!({ "title": "dell" })).unwrap().0, 3);
+        // A guessed id with a title falls back to the title.
+        assert_eq!(f(json!({ "id": 1, "title": "Local AI" })).unwrap().0, 7);
+        assert!(f(json!({ "id": 1 })).unwrap_err().contains("Call list_todos"));
+        let e = f(json!({ "title": "test" })).unwrap_err();
+        assert!(e.contains("#7 Test Local AI tools") && e.contains("#9 Test backups"), "{e}");
+        assert!(f(json!({})).is_err() && f(json!({ "title": "zebra" })).is_err());
+    }
+
+    #[test]
+    fn change_requests_are_spotted() {
+        assert!(wants_change("mark the test Local AI tools todo done"));
+        assert!(wants_change("Delete the test todo"));
+        assert!(wants_change("remind me at 5 to call mom"));
+        assert!(!wants_change("Which UniFi sites have problems?"));
+        assert!(!wants_change("What's going on today? Give me the overview."));
+        assert!(about_data("Which UniFi sites have problems?", "") && !about_data("hello there", ""));
+        let u = |tool: &str, ok: bool| Used { tool: tool.into(), label: String::new(), ok, waiting: false };
+        assert!(!changed(&[u("list_todos", true), u("update_todo", false)]));
+        assert!(changed(&[u("update_todo", true)]) && changed(&[u("delete_todo", true)]));
     }
 
     #[test]
