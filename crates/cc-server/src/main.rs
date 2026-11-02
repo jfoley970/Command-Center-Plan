@@ -28,7 +28,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Path, Request, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    handler::HandlerWithoutStateExt,
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -39,7 +40,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 
 #[derive(Clone)]
 struct Auth {
@@ -89,8 +90,37 @@ fn router(core: Arc<Core>, auth: Auth, web_dir: &FsPath) -> Router {
     // Webhooks prove who they are with a signature, not a sign-in. A long
     // recording's transcript can be a few megabytes.
     let hooks = Router::new().route("/pocket", post(pocket_hook)).layer(DefaultBodyLimit::max(16 * 1024 * 1024));
-    let spa = ServeDir::new(web_dir).fallback(ServeFile::new(web_dir.join("index.html")));
-    Router::new().nest("/api", api).nest("/hooks", hooks).fallback_service(spa).with_state(AppState { core })
+    // Any path that isn't a file gets the app page, so the UI's own routes load. A path that names
+    // a file (its last part has an extension) and is missing gets a 404 instead, so a browser never
+    // caches the app page under an image's or script's name.
+    let index = Bytes::from(std::fs::read(web_dir.join("index.html")).unwrap_or_default());
+    let app_page = move |uri: Uri| {
+        let index = index.clone();
+        async move {
+            let names_a_file = uri.path().rsplit('/').next().is_some_and(|last| last.contains('.'));
+            if names_a_file || index.is_empty() {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index).into_response()
+        }
+    };
+    let spa = ServeDir::new(web_dir).fallback(app_page.into_service());
+    Router::new()
+        .nest("/api", api)
+        .nest("/hooks", hooks)
+        .fallback_service(spa)
+        .layer(middleware::map_response(revalidate_pages))
+        .with_state(AppState { core })
+}
+
+/// Browsers recheck the app page on every load, so a new deploy's stylesheet and script are picked
+/// up right away. The hashed files under /assets keep normal caching.
+async fn revalidate_pages(mut resp: Response) -> Response {
+    let is_page = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|ct| ct.starts_with("text/html"));
+    if is_page {
+        resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    resp
 }
 
 async fn require_auth(State(auth): State<Auth>, req: Request, next: Next) -> Response {
