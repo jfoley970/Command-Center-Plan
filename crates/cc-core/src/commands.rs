@@ -961,6 +961,7 @@ where
                 // Only tools offered for this message run, even if the model knows other names.
                 (format!("Error: {name} isn't available for this message."), None)
             } else {
+                let args = drop_made_up_due(&name, args, asked.input);
                 let (r, u) = crate::tools::run(core, asked.ctx, &name, &args).await;
                 (r, Some(u))
             };
@@ -978,6 +979,17 @@ fn trustworthy(asked: &str, answer: &str, used: &[crate::tools::Used]) -> bool {
     !answer.contains(NOTHING_CHANGED.trim())
         && used.iter().all(|u| u.ok)
         && !(crate::tools::wants_change(asked) && !crate::tools::changed(used))
+}
+
+/// A small model sometimes gives a new todo a due date nobody asked for. Keep
+/// one only when the message says when.
+fn drop_made_up_due(tool: &str, mut args: Value, said: &str) -> Value {
+    if tool == "add_todo" && !crate::tools::mentions_time(said) {
+        if let Some(o) = args.as_object_mut() {
+            o.remove("due");
+        }
+    }
+    args
 }
 
 /// What the user asked, apart from the day's context sent with it.
@@ -1307,6 +1319,15 @@ mod tests {
         assert_eq!(answer.text, "Marked “Test Local AI tools” done.");
         assert!(used[0].ok, "{:?}", used);
         assert!(db::list_todos(&core.db.0.lock().unwrap()).unwrap()[0].done);
+    }
+
+    #[test]
+    fn todos_only_get_a_due_date_when_one_was_said() {
+        let a = json!({ "title": "approval test", "priority": "low", "due": "2026-11-01 23:06" });
+        assert!(drop_made_up_due("add_todo", a.clone(), "Add a todo: approval test, low priority").get("due").is_none());
+        assert!(drop_made_up_due("add_todo", a.clone(), "add a todo to call Dell by Friday").get("due").is_some());
+        assert!(drop_made_up_due("add_todo", a.clone(), "todo: renew cert, due 11/15").get("due").is_some());
+        assert!(drop_made_up_due("add_reminder", a, "remind me").get("due").is_some());
     }
 
     #[test]

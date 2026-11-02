@@ -562,6 +562,19 @@ fn find_reminder(core: &Arc<Core>, a: &Value) -> Result<db::Reminder, String> {
     find_one(&all, a, "reminder", "list_reminders", |r| r.id, |r| r.title.as_str())
 }
 
+/// Whether a message says when: a date, a time, or a day word.
+pub fn mentions_time(input: &str) -> bool {
+    let t = input.to_lowercase();
+    const WORDS: &[&str] = &[
+        "today", "tonight", "tomorrow", "yesterday", "morning", "afternoon", "evening", "noon", "midnight", "week", "month",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "due", " by ", "before", "until", "next ",
+        "o'clock", " am", " pm", "minute", "hour", "january", "february", "march", "april", "may ", "june", "july", "august",
+        "september", "october", "november", "december", "jan ", "feb ", "mar ", "apr ", "jun ", "jul ", "aug ", "sep ", "oct ",
+        "nov ", "dec ",
+    ];
+    t.chars().any(|c| c.is_ascii_digit()) || WORDS.iter().any(|w| format!(" {t} ").contains(w))
+}
+
 /// Words that mean the user wants something changed, not just looked at.
 const CHANGE_WORDS: &[&str] = &[
     "add ", "create", "make ", "new todo", "new reminder", "mark", "tick", "check off", "complete", "finish", "reopen",
