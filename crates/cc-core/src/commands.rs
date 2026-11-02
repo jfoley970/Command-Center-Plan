@@ -757,6 +757,7 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         return Ok(db::list_runs(&conn(), Some(agent_id), 1).map_err(err)?.remove(0));
     }
 
+    let mut unreliable = false;
     let result = match provider.id {
         "chatgpt" => openai::chatgpt(&api_key, &agent.model, &system, &history, &user).await,
         "grok" => openai::grok(&api_key, &agent.model, &system, &history, &user).await,
@@ -765,9 +766,12 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
             let picked = crate::tools::pick(input.trim(), &recent);
             let system = format!("{system}\n\n{}", crate::tools::system_note(chrono::Local::now()));
             let ctx = crate::tools::Ctx { run_id: Some(run_id), agent_id: Some(agent_id) };
-            match local_with_tools(core, ctx, &agent.model, &system, &history, &user, &picked).await {
+            let asked = Asked { ctx, input: input.trim(), about_data: crate::tools::about_data(input.trim(), "") };
+            match local_with_tools(core, &asked, &agent.model, &system, &history, &user, &picked).await {
                 Ok((c, used)) => {
                     db::set_run_tools(&core.db.0.lock().unwrap(), run_id, &used).map_err(err)?;
+                    // Don't learn from an answer that went wrong; it may say things that aren't so.
+                    unreliable = used.iter().any(|u| !u.ok) || c.text.ends_with(NOTHING_CHANGED);
                     Ok(c)
                 }
                 Err(e) => Err(e),
@@ -790,7 +794,7 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         db::list_runs(&conn, Some(agent_id), 1).map_err(err)?.remove(0)
     };
     core.changed("runs-changed");
-    if learns(&agent) && run.status == "done" && !input.trim().is_empty() {
+    if learns(&agent) && run.status == "done" && !input.trim().is_empty() && !unreliable {
         let (core, agent, said, reply) = (core.clone(), agent.clone(), input.trim().to_string(), run.output.clone());
         tokio::spawn(async move {
             if let Err(e) = learn(&core, &agent, &said, &reply).await {
@@ -873,7 +877,7 @@ const TOOL_CALLS_PER_ROUND: usize = 6;
 /// tools it used, in order.
 async fn local_with_tools(
     core: &Arc<Core>,
-    ctx: crate::tools::Ctx,
+    asked: &Asked<'_>,
     model: &str,
     system: &str,
     history: &claude::History,
@@ -885,13 +889,13 @@ async fn local_with_tools(
         let model = model.clone();
         async move { ollama::chat_step(&model, &messages, &tools).await }
     };
-    tool_loop(core, ctx, system, history, user, picked, step).await
+    tool_loop(core, asked, system, history, user, picked, step).await
 }
 
 /// The back-and-forth behind `local_with_tools`; `step` asks the model once.
 async fn tool_loop<F, Fut>(
     core: &Arc<Core>,
-    ctx: crate::tools::Ctx,
+    asked: &Asked<'_>,
     system: &str,
     history: &claude::History,
     user: &str,
@@ -905,8 +909,9 @@ where
     let schema = crate::tools::schema(picked);
     let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
     messages.extend(claude::messages(history, user));
-    let mut used = vec![];
+    let mut used: Vec<crate::tools::Used> = vec![];
     let (mut input_tokens, mut output_tokens) = (0, 0);
+    let mut nudged = false;
     for round in 0..=TOOL_ROUNDS {
         // The last round offers no tools, so the model has to answer.
         let offer: Vec<Value> = if round == TOOL_ROUNDS { vec![] } else { schema.clone() };
@@ -916,7 +921,26 @@ where
         output_tokens += c.output_tokens;
         let calls = ollama::tool_calls(&message);
         if calls.is_empty() || no_tools {
-            let text = if c.text.is_empty() && !used.is_empty() { "Done.".to_string() } else { c.text };
+            // A small model sometimes answers "done" without calling anything, or
+            // from an old answer in the chat. Send it back once.
+            let wants = crate::tools::wants_change(asked.input);
+            let nudge = if wants && !crate::tools::changed(&used) {
+                Some(NUDGE_CHANGE)
+            } else if used.is_empty() && asked.about_data {
+                Some(NUDGE_LOOK)
+            } else {
+                None
+            };
+            if let (Some(n), false, false) = (nudge, nudged, no_tools) {
+                nudged = true;
+                messages.push(serde_json::json!({ "role": "assistant", "content": c.text }));
+                messages.push(serde_json::json!({ "role": "user", "content": n }));
+                continue;
+            }
+            let mut text = if c.text.is_empty() && !used.is_empty() { "Done.".to_string() } else { c.text };
+            if wants && !crate::tools::changed(&used) && claims_change(&text) {
+                text.push_str(NOTHING_CHANGED);
+            }
             return Ok((claude::Completion { text, input_tokens, output_tokens, ..c }, used));
         }
         messages.push(serde_json::json!({
@@ -931,7 +955,7 @@ where
                 // Only tools offered for this message run, even if the model knows other names.
                 (format!("Error: {name} isn't available for this message."), None)
             } else {
-                let (r, u) = crate::tools::run(core, ctx, &name, &args).await;
+                let (r, u) = crate::tools::run(core, asked.ctx, &name, &args).await;
                 (r, Some(u))
             };
             used.extend(u);
@@ -941,12 +965,42 @@ where
     Err("Local AI kept calling tools without answering.".into())
 }
 
+/// What the user asked, apart from the day's context sent with it.
+pub(crate) struct Asked<'a> {
+    /// The run the tools report into.
+    pub ctx: crate::tools::Ctx,
+    pub input: &'a str,
+    /// The message (or the end of the chat) is about the user's data, so the
+    /// answer should come from a tool, not from memory of earlier answers.
+    pub about_data: bool,
+}
+
+const NUDGE_CHANGE: &str = "(Command Center check, not from the user.) You haven't called a tool for this, so nothing has changed yet. \
+If the user asked for a change, call the tool for it now; name the item by its title if you don't have its id. \
+If you can't do it, say plainly that you didn't.";
+const NUDGE_LOOK: &str = "(Command Center check, not from the user.) Your earlier answers in this chat may be out of date. \
+Call a tool to get the current data, then answer from what it returns.";
+/// Added to an answer that claims a change no tool made.
+const NOTHING_CHANGED: &str = "\n\n(Command Center: nothing was actually changed. Local AI didn't complete a tool for this, so please check or ask again.)";
+
+/// Whether an answer says something was changed.
+fn claims_change(text: &str) -> bool {
+    let t = text.to_lowercase();
+    [
+        "added", "marked", "deleted", "removed", "moved", "snoozed", "created", "updated", "completed", "rescheduled", "is set",
+        "have set", "i've set", "i set", "sent", "started", "paused", "reset", "renamed", "done",
+    ]
+    .iter()
+    .any(|w| t.contains(w))
+}
+
 const LEARN_SYSTEM: &str = "You keep an AI assistant's long-term memory: a short list of lasting facts about its user. \
 You get the current list (numbered) and the newest exchange. Answer with JSON: \
 \"add\" = new lasting facts the exchange reveals, and \"forget\" = numbers of listed facts that are now wrong, outdated, or the user asked to forget. \
 Worth keeping: the user's name and how to address them, people and pets in their life, their job, projects, tools and devices, \
 preferences and dislikes, plans and dates, standing instructions, and anything they say to remember. \
-Not worth keeping: one-off questions, small talk, facts about the world, what the assistant said or did, or anything already listed. \
+Not worth keeping: one-off questions, small talk, facts about the world, what the assistant said or did, anything already listed, \
+and the current state of their todos, reminders, alerts, network sites, devices or inbox (the app already tracks those, and they change). \
 Write each fact as one short sentence about the user in third person, such as \"Prefers metric units.\" \
 Most exchanges have nothing new: then both lists are empty.";
 
@@ -1143,7 +1197,7 @@ mod tests {
             };
             async move { Ok(out) }
         };
-        let (answer, used) = tool_loop(&core, Default::default(), "sys", &[], "add a todo to call Dell", &picked, step).await.unwrap();
+        let (answer, used) = tool_loop(&core, &Asked { ctx: Default::default(), input: "add a todo to call Dell", about_data: true }, "sys", &[], "add a todo to call Dell", &picked, step).await.unwrap();
         assert_eq!((answer.text.as_str(), answer.input_tokens), ("Added it.", 20));
         assert_eq!(used.len(), 1);
         assert_eq!(used[0].label, "Added todo “Call Dell”");
@@ -1174,13 +1228,13 @@ mod tests {
         // Nothing deleted until approved.
         assert_eq!(call(&core, "list_todos", Value::Null).await.unwrap().as_array().unwrap().len(), 1);
         let pending = call(&core, "list_tool_approvals", Value::Null).await.unwrap();
-        assert_eq!((pending[0]["status"].as_str(), pending[0]["summary"].as_str()), (Some("pending"), Some("Delete todo “Old task”")));
+        assert_eq!((pending[0]["status"].as_str(), pending[0]["summary"].as_str()), (Some("pending"), Some(format!("Delete todo #{id} “Old task”").as_str())));
         let done = call(&core, "approve_tool", json!({ "id": pending[0]["id"] })).await.unwrap();
         assert_eq!(done["status"], "done");
         assert_eq!(call(&core, "list_todos", Value::Null).await.unwrap(), json!([]));
         assert!(call(&core, "approve_tool", json!({ "id": pending[0]["id"] })).await.is_err(), "runs once");
         let out = db::get_run(&core.db.0.lock().unwrap(), run).unwrap().unwrap().output;
-        assert!(out.ends_with("✓ Approved: Delete todo “Old task”. Deleted."), "{out}");
+        assert!(out.ends_with(&format!("✓ Approved: Delete todo #{id} “Old task”. Deleted.")), "{out}");
 
         // Rejected requests never run.
         let r = call(&core, "add_reminder", json!({ "reminder": { "title": "Ping", "remind_at": "2030-01-01T09:00:00Z" } })).await.unwrap();
@@ -1192,13 +1246,87 @@ mod tests {
 
         // Bad ids and AIs without keys are refused up front.
         let (text, used) = crate::tools::run(&core, ctx, "delete_todo", &json!({ "id": 999 })).await;
-        assert!(text.contains("no todo #999") && !used.ok);
+        assert!(text.contains("no todo #999") && text.contains("list_todos") && !used.ok);
         if std::env::var("XAI_API_KEY").is_err() {
             let (text, _) = crate::tools::run(&core, ctx, "ask_ai", &json!({ "ai": "grok", "question": "hi" })).await;
             assert!(text.contains("no key"), "{text}");
         }
         let (text, _) = crate::tools::run(&core, ctx, "send_email", &json!({ "to": "a@b.com", "subject": "Hi", "body": "x" })).await;
         assert!(text.contains("No inbox"), "{text}");
+    }
+
+    /// A stand-in model that answers from a script, one reply per call.
+    fn scripted(replies: Vec<Value>) -> (std::sync::Mutex<Vec<Vec<Value>>>, std::sync::Mutex<std::collections::VecDeque<Value>>) {
+        (std::sync::Mutex::new(vec![]), std::sync::Mutex::new(replies.into()))
+    }
+
+    #[tokio::test]
+    async fn a_claimed_change_without_a_tool_is_sent_back_then_flagged() {
+        let core = core();
+        call(&core, "add_todo", json!({ "todo": { "title": "Test Local AI tools" } })).await.unwrap();
+        let input = "mark the test Local AI tools todo done";
+        let picked = crate::tools::pick(input, "");
+        let asked = Asked { ctx: Default::default(), input, about_data: true };
+        let c = |text: &str| claude::Completion { text: text.into(), stop_reason: "end_turn".into(), model: String::new(), input_tokens: 1, output_tokens: 1 };
+
+        // Claims it twice without a tool: sent back once, then flagged.
+        let (seen, script) = scripted(vec![json!({ "content": "Todo marked as done." }), json!({ "content": "Done, it's marked as done." })]);
+        let step = |m: Vec<Value>, _: Vec<Value>| {
+            seen.lock().unwrap().push(m);
+            let msg = script.lock().unwrap().pop_front().unwrap();
+            let comp = c(msg["content"].as_str().unwrap());
+            async move { Ok((msg, comp)) }
+        };
+        let (answer, used) = tool_loop(&core, &asked, "sys", &[], input, &picked, step).await.unwrap();
+        assert!(used.is_empty());
+        assert!(answer.text.ends_with(NOTHING_CHANGED), "{}", answer.text);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            assert_eq!(seen[1].last().unwrap()["content"], NUDGE_CHANGE);
+        }
+        assert!(!db::list_todos(&core.db.0.lock().unwrap()).unwrap()[0].done);
+
+        // Sent back, it calls the tool by title (a guessed id falls back to the title) and it's real.
+        let (_seen, script) = scripted(vec![
+            json!({ "content": "Todo marked as done." }),
+            json!({ "content": "", "tool_calls": [{ "function": { "name": "update_todo", "arguments": { "id": 1234, "title": "test local ai tools", "done": true } } }] }),
+            json!({ "content": "Marked “Test Local AI tools” done." }),
+        ]);
+        let step = |_: Vec<Value>, _: Vec<Value>| {
+            let msg = script.lock().unwrap().pop_front().unwrap();
+            let comp = c(msg["content"].as_str().unwrap());
+            async move { Ok((msg, comp)) }
+        };
+        let (answer, used) = tool_loop(&core, &asked, "sys", &[], input, &picked, step).await.unwrap();
+        assert_eq!(answer.text, "Marked “Test Local AI tools” done.");
+        assert!(used[0].ok, "{:?}", used);
+        assert!(db::list_todos(&core.db.0.lock().unwrap()).unwrap()[0].done);
+    }
+
+    #[tokio::test]
+    async fn a_data_question_answered_from_memory_is_sent_to_look() {
+        let core = core();
+        let input = "Which UniFi sites have problems?";
+        let picked = crate::tools::pick(input, "");
+        let asked = Asked { ctx: Default::default(), input, about_data: crate::tools::about_data(input, "") };
+        let (seen, script) = scripted(vec![
+            json!({ "content": "Vail Chapel is down." }),
+            json!({ "content": "", "tool_calls": [{ "function": { "name": "unifi_sites", "arguments": { "problems_only": true } } }] }),
+            json!({ "content": "UniFi isn't connected." }),
+        ]);
+        let step = |m: Vec<Value>, _: Vec<Value>| {
+            seen.lock().unwrap().push(m);
+            let msg = script.lock().unwrap().pop_front().unwrap();
+            let comp = claude::Completion { text: msg["content"].as_str().unwrap().into(), stop_reason: "end_turn".into(), model: String::new(), input_tokens: 0, output_tokens: 0 };
+            async move { Ok((msg, comp)) }
+        };
+        let (answer, used) = tool_loop(&core, &asked, "sys", &[], input, &picked, step).await.unwrap();
+        assert_eq!(answer.text, "UniFi isn't connected.");
+        assert_eq!(used[0].tool, "unifi_sites");
+        assert_eq!(seen.lock().unwrap()[1].last().unwrap()["content"], NUDGE_LOOK);
+        // A plain chat isn't sent back.
+        assert!(!claims_change("Hi Master Chief.") && claims_change("I've added it."));
     }
 
     #[tokio::test]
@@ -1217,7 +1345,7 @@ mod tests {
             let c = claude::Completion { text: msg["content"].as_str().unwrap().into(), ..c };
             async move { Ok((msg, c)) }
         };
-        let (answer, used) = tool_loop(&core, Default::default(), "sys", &[], "todos", &picked, step).await.unwrap();
+        let (answer, used) = tool_loop(&core, &Asked { ctx: Default::default(), input: "todos", about_data: true }, "sys", &[], "todos", &picked, step).await.unwrap();
         assert_eq!(answer.text, "Here you go.");
         assert_eq!(used.len(), TOOL_ROUNDS);
         let r = rounds.lock().unwrap();
