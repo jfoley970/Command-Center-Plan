@@ -39,8 +39,15 @@ const MAX_PAGES: u32 = 5;
 const TRANSCRIPT_WAIT_HOURS: i64 = 6;
 /// Pocket's signature timestamp must be this fresh, so a captured request can't be replayed later.
 const WEBHOOK_MAX_AGE_MS: i64 = 5 * 60 * 1000;
-/// Longest command kept; anything past this was probably not meant as one.
+/// Longest todo, reminder or project title kept; anything past this was
+/// probably not meant as one.
 const MAX_COMMAND_CHARS: usize = 500;
+/// Longest request handed to an AI. A question dictated to Claude can run on.
+const MAX_REQUEST_CHARS: usize = 4000;
+/// Names that may open a recording in place of the wake phrase ("Claude, ...").
+/// "Local", "Ollama" and "Copilot" are left out: the first starts too many
+/// ordinary sentences, and the others can't answer on their own.
+const NAME_WAKE_PROVIDERS: &[&str] = &["claude", "chatgpt", "gpt", "openai", "grok", "cursor"];
 
 pub const DEFAULT_WAKE: &str = "command center";
 
@@ -49,6 +56,8 @@ const SET_AUTO: &str = "pocket_auto";
 const SET_SINCE: &str = "pocket_since";
 const SET_AI: &str = "pocket_ai";
 const SET_AI_MODEL: &str = "pocket_ai_model";
+const SET_TRIGGERS: &str = "pocket_triggers";
+const MAX_TRIGGERS: usize = 20;
 /// How long a local model may take over one command (it may have to load first).
 const AI_TIMEOUT_SECS: u64 = 120;
 
@@ -169,10 +178,14 @@ impl Auto {
             Auto::None => "none",
         }
     }
-    fn runs(self, p: &Parsed) -> bool {
+    /// `background` says the request goes to an agent that changes things on
+    /// its own (Cursor works on a repository), so it still waits for a tap
+    /// unless everything runs. A question to a chat AI only gets an answer, so
+    /// it runs at once like a todo.
+    fn runs(self, p: &Parsed, background: bool) -> bool {
         match p.kind.as_str() {
             "reminder" if p.due_at.is_none() => false,
-            "agent" => self == Auto::All,
+            "agent" if background => self == Auto::All,
             _ => self != Auto::None,
         }
     }
@@ -202,6 +215,93 @@ pub fn set_options(core: &Core, wake: &str, auto: Auto, ai: bool, ai_model: &str
     drop(conn);
     core.changed("pocket-changed");
     Ok(())
+}
+
+// ---------- Trigger words ----------
+
+/// A word you choose and what it does when a recording (or a command after the
+/// wake phrase) opens with it: "Jeeves, ..." asks Claude, "Note, ..." adds a todo.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Trigger {
+    pub word: String,
+    /// `provider:<id>`, `agent:<id>`, or one of `todo`, `reminder`, `project`.
+    pub target: String,
+    /// What the target is called, filled in when saved, for display.
+    #[serde(default)]
+    pub target_name: String,
+}
+
+pub fn triggers(conn: &Connection) -> Vec<Trigger> {
+    setting(conn, SET_TRIGGERS).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Checks and saves the whole list. Each word must be new, and each target
+/// must be something that can run.
+pub fn set_triggers(core: &Core, list: Vec<Trigger>) -> Result<Vec<Trigger>, String> {
+    if list.len() > MAX_TRIGGERS {
+        return Err(format!("Keep it to {MAX_TRIGGERS} trigger words."));
+    }
+    let conn = core.db.0.lock().unwrap();
+    let wake = norm(&setting(&conn, SET_WAKE).unwrap_or_else(|| DEFAULT_WAKE.into()));
+    let agents = db::list_agents(&conn).map_err(|e| e.to_string())?;
+    let mut seen = vec![];
+    let mut out = vec![];
+    for t in list {
+        let word = tidy(&t.word);
+        let key = norm(&word);
+        if key.is_empty() {
+            return Err("Each trigger needs a word.".into());
+        }
+        if word.len() > 40 || words(&word).len() > 3 {
+            return Err(format!("\"{word}\" is long for a trigger. Keep it to a word or two."));
+        }
+        if key == wake {
+            return Err(format!("\"{word}\" is already your wake phrase."));
+        }
+        if seen.contains(&key) {
+            return Err(format!("\"{word}\" is listed twice."));
+        }
+        seen.push(key);
+        let target_name = match t.target.split_once(':') {
+            Some(("provider", id)) => match providers::find(id) {
+                Some(p) if p.unavailable.is_none() => p.name.to_string(),
+                Some(p) => return Err(format!("{} can't take requests yet.", p.name)),
+                None => return Err("That AI isn't one the Command Center knows.".into()),
+            },
+            Some(("agent", id)) => agents
+                .iter()
+                .find(|a| id.parse() == Ok(a.id))
+                .map(|a| a.name.clone())
+                .ok_or("That agent no longer exists.")?,
+            None if t.target == "todo" => "New todo".into(),
+            None if t.target == "reminder" => "New reminder".into(),
+            None if t.target == "project" => "New project".into(),
+            _ => return Err(format!("Pick what \"{word}\" should do.")),
+        };
+        out.push(Trigger { word, target: t.target, target_name });
+    }
+    db::set_setting(&conn, SET_TRIGGERS, &serde_json::to_string(&out).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    drop(conn);
+    core.changed("pocket-changed");
+    Ok(out)
+}
+
+/// The trigger a command opens with, and the words after it.
+fn match_trigger<'a>(text: &str, triggers: &'a [Trigger]) -> Option<(&'a Trigger, String)> {
+    let ws = words(text);
+    triggers
+        .iter()
+        .filter_map(|t| {
+            let tw = words(&t.word);
+            let n = tw.len();
+            let hit = n > 0 && ws.len() >= n && ws[..n].iter().map(|(_, w)| w).eq(tw.iter().map(|(_, w)| w));
+            hit.then(|| {
+                let from = ws.get(n).map_or(text.len(), |(s, _)| *s);
+                (n, t, tidy(&text[from..]))
+            })
+        })
+        .max_by_key(|(n, _, _)| *n)
+        .map(|(_, t, rest)| (t, rest))
 }
 
 /// Called when a key or webhook secret is first saved: only recordings made
@@ -284,10 +384,27 @@ pub fn extract(transcript: &str, wake: &str) -> Vec<String> {
         .map(|(a, b)| {
             let from = ws[a].0;
             let to = ws.get(b).map_or(transcript.len(), |(s, _)| *s);
-            tidy(&transcript[from..to]).chars().take(MAX_COMMAND_CHARS).collect::<String>()
+            tidy(&transcript[from..to]).chars().take(MAX_REQUEST_CHARS).collect::<String>()
         })
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// A recording that opens with an AI's or agent's name instead of the wake
+/// phrase ("Claude, what should I cook tonight?") is one request to it, the
+/// whole recording long. A word such as "hey" or "OK" before the name is fine.
+pub fn name_led(transcript: &str, agents: &[(i64, String)], triggers: &[Trigger]) -> Option<String> {
+    let ws = words(transcript);
+    let skip = ws.iter().take_while(|(_, w)| ["hey", "ok", "okay", "hi", "yo"].contains(&w.as_str())).count().min(2);
+    let (from, first) = ws.get(skip)?;
+    let text = tidy(&transcript[*from..]).chars().take(MAX_REQUEST_CHARS).collect::<String>();
+    let names_agent = agents.iter().any(|(_, name)| {
+        let n = words(name);
+        !n.is_empty() && ws.len() > skip + n.len() && ws[skip..skip + n.len()].iter().map(|(_, w)| w).eq(n.iter().map(|(_, w)| w))
+    });
+    let names_provider = NAME_WAKE_PROVIDERS.contains(&first.as_str()) && ws.len() > skip + 1;
+    let names_trigger = match_trigger(&text, triggers).is_some_and(|(_, rest)| !rest.is_empty());
+    (names_agent || names_provider || names_trigger).then_some(text)
 }
 
 fn tidy(s: &str) -> String {
@@ -506,7 +623,33 @@ fn route(text: &str, agents: &[(i64, String)]) -> Option<(String, String, String
 /// Decides what a spoken command is. Anything that isn't clearly a reminder,
 /// a new project or an agent request becomes a todo, the same as Enter in the command bar.
 pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> Parsed {
+    parse_with(command, agents, &[], now)
+}
+
+/// [`parse`], with your trigger words read first.
+pub fn parse_with(command: &str, agents: &[(i64, String)], triggers: &[Trigger], now: DateTime<Local>) -> Parsed {
     let text = tidy(command);
+    if let Some((t, rest)) = match_trigger(&text, triggers) {
+        if !rest.is_empty() {
+            // The kinds reuse the rules by saying what the trigger stands for.
+            let rest = rest.strip_prefix("to ").unwrap_or(&rest);
+            match t.target.as_str() {
+                "todo" => return parse(&format!("add a todo {rest}"), agents, now),
+                "reminder" => return parse(&format!("remind me {rest}"), agents, now),
+                "project" => return parse(&format!("new project {rest}"), agents, now),
+                target => {
+                    return Parsed {
+                        kind: "agent".into(),
+                        title: capitalize(rest),
+                        due_at: None,
+                        target: target.to_string(),
+                        target_name: t.target_name.clone(),
+                        sure: true,
+                    }
+                }
+            }
+        }
+    }
     // "add a todo to call Bob tomorrow" is due tomorrow. Unclear commands keep
     // their words as they are; the local model may find a date in them.
     let todo = |title: &str, sure: bool| {
@@ -521,6 +664,14 @@ pub fn parse(command: &str, agents: &[(i64, String)], now: DateTime<Local>) -> P
             sure,
         }
     };
+
+    // A command that opens with an AI's or agent's name is a request to it,
+    // whatever it says next: "Claude, remind me how DNS works" asks Claude.
+    if let Some((target, target_name, rest)) = route(&text, agents) {
+        if !rest.is_empty() {
+            return Parsed { kind: "agent".into(), title: capitalize(&rest), due_at: None, target, target_name, sure: true };
+        }
+    }
 
     if let Some(m) = REMIND.find(&text) {
         let (at, rest) = when(&text[m.end()..], now);
@@ -675,26 +826,37 @@ async fn interpret(heard: &str, agents: &[(i64, String)], now: DateTime<Local>, 
 /// Stores the commands found in one recording and runs the ones the
 /// auto-run setting allows.
 async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String>, transcript: &str) -> Result<(), String> {
-    let (wake, auto, ai, ai_model, agents) = {
+    let (wake, auto, ai, ai_model, agents, background, triggers) = {
         let conn = core.db.0.lock().unwrap();
-        let agents: Vec<(i64, String)> =
-            db::list_agents(&conn).map_err(|e| e.to_string())?.into_iter().map(|a| (a.id, a.name)).collect();
+        let all = db::list_agents(&conn).map_err(|e| e.to_string())?;
+        let background: Vec<String> = all
+            .iter()
+            .filter(|a| providers::find(&a.provider).is_some_and(|p| p.background))
+            .map(|a| format!("agent:{}", a.id))
+            .chain(providers::PROVIDERS.iter().filter(|p| p.background).map(|p| format!("provider:{}", p.id)))
+            .collect();
+        let agents: Vec<(i64, String)> = all.into_iter().map(|a| (a.id, a.name)).collect();
         (
             setting(&conn, SET_WAKE).unwrap_or_else(|| DEFAULT_WAKE.into()),
             Auto::parse(setting(&conn, SET_AUTO)),
             ai_on(&conn),
             setting(&conn, SET_AI_MODEL).unwrap_or_default(),
             agents,
+            background,
+            triggers(&conn),
         )
     };
-    let found = extract(transcript, &wake);
+    let mut found = extract(transcript, &wake);
+    if found.is_empty() {
+        found.extend(name_led(transcript, &agents, &triggers));
+    }
     if found.is_empty() {
         return Ok(());
     }
     let now = Local::now();
     let mut read = vec![];
     for heard in &found {
-        let p = parse(heard, &agents, now);
+        let p = parse_with(heard, &agents, &triggers, now);
         if p.sure || !ai {
             read.push((p, "rules"));
             continue;
@@ -714,7 +876,8 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
         .into_iter()
         .map(|(p, via)| match p.kind.as_str() {
             "reminder" if p.due_at.is_none() => (Parsed { due_at: Some(business_close_utc()), ..p }, via),
-            _ => (p, via),
+            "agent" => (p, via),
+            _ => (Parsed { title: p.title.chars().take(MAX_COMMAND_CHARS).collect(), ..p }, via),
         })
         .collect();
     let mut to_run = vec![];
@@ -728,7 +891,7 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
             )
             .map_err(|e| e.to_string())?;
             let id = conn.last_insert_rowid();
-            if auto.runs(&p) {
+            if auto.runs(&p, background.contains(&p.target)) {
                 to_run.push(id);
             } else {
                 core.notify("Pocket command to review", describe(&p.kind, &p.title, &p.target_name));
@@ -1097,6 +1260,7 @@ pub struct Snapshot {
     pub checked_at: Option<String>,
     pub error: Option<String>,
     pub commands: Vec<Command>,
+    pub triggers: Vec<Trigger>,
 }
 
 #[derive(Default)]
@@ -1121,6 +1285,7 @@ impl PocketState {
             checked_at: if has_key { checked_at } else { None },
             error: if has_key { error } else { None },
             commands: list(&conn, 50).map_err(|e| e.to_string())?,
+            triggers: triggers(&conn),
         })
     }
 }
@@ -1263,6 +1428,54 @@ mod tests {
         assert_eq!(parse("tell bugfixer to update the readme", &agents, now).title, "Update the readme");
         // A name alone isn't a request.
         assert_eq!(parse("Grok.", &agents, now).kind, "todo");
+        // Leading with a name wins over words that look like a reminder.
+        let p = parse("Claude, remind me how DNS works", &agents, now);
+        assert_eq!((p.kind.as_str(), p.target.as_str(), p.title.as_str()), ("agent", "provider:claude", "Remind me how DNS works"));
+    }
+
+    #[test]
+    fn a_name_can_open_the_recording() {
+        let agents = vec![(1, "Daily Planner".to_string())];
+        assert_eq!(name_led("Claude, what should I cook tonight?", &agents, &[]).as_deref(), Some("Claude, what should I cook tonight?"));
+        assert_eq!(name_led("Hey Grok what's new on X", &agents, &[]).as_deref(), Some("Grok what's new on X"));
+        assert_eq!(name_led("Daily Planner, what's left today", &agents, &[]).as_deref(), Some("Daily Planner, what's left today"));
+        // Ordinary recordings, a bare name, and names that start sentences are left alone.
+        assert!(name_led("So we talked about Claude and the budget.", &agents, &[]).is_none());
+        assert!(name_led("Claude.", &agents, &[]).is_none());
+        assert!(name_led("Local news said it would snow.", &agents, &[]).is_none());
+        assert!(name_led("Daily standup notes", &agents, &[]).is_none());
+        // Long dictation is kept for the AI.
+        let long = format!("Claude, {}", "word ".repeat(300));
+        assert!(name_led(&long, &agents, &[]).unwrap().len() > MAX_COMMAND_CHARS);
+        // Your own trigger words open a recording too.
+        let t = [Trigger { word: "Jeeves".into(), target: "provider:claude".into(), target_name: "Claude".into() }];
+        assert_eq!(name_led("Jeeves, what's the weather", &agents, &t).as_deref(), Some("Jeeves, what's the weather"));
+    }
+
+    #[test]
+    fn trigger_words_do_what_you_set() {
+        let now = at(10, 0);
+        let agents = vec![(1, "Daily Planner".to_string())];
+        let t = |w: &str, target: &str, name: &str| Trigger { word: w.into(), target: target.into(), target_name: name.into() };
+        let ts = [
+            t("Jeeves", "provider:claude", "Claude"),
+            t("Planner", "agent:1", "Daily Planner"),
+            t("Note", "todo", "New todo"),
+            t("Ping me", "reminder", "New reminder"),
+            t("Big idea", "project", "New project"),
+        ];
+        let p = parse_with("Jeeves, explain VLANs", &agents, &ts, now);
+        assert_eq!((p.kind.as_str(), p.target.as_str(), p.target_name.as_str(), p.title.as_str()), ("agent", "provider:claude", "Claude", "Explain VLANs"));
+        assert_eq!(parse_with("planner what's left", &agents, &ts, now).target, "agent:1");
+        let p = parse_with("Note, buy cable", &agents, &ts, now);
+        assert_eq!((p.kind.as_str(), p.title.as_str()), ("todo", "Buy cable"));
+        let p = parse_with("Ping me at 3 PM to call Dana", &agents, &ts, now);
+        assert_eq!((p.kind.as_str(), p.title.as_str(), p.sure), ("reminder", "Call Dana", true));
+        assert_eq!(parse_with("Big idea home lab rack", &agents, &ts, now).kind, "project");
+        // Without a trigger, the rules are unchanged.
+        assert_eq!(parse_with("todo buy milk", &agents, &ts, now), parse("todo buy milk", &agents, now));
+        // A trigger alone does nothing.
+        assert_eq!(parse_with("Jeeves.", &agents, &ts, now).kind, "todo");
     }
 
     #[test]
@@ -1275,12 +1488,15 @@ mod tests {
             target_name: String::new(),
             sure: true,
         };
-        assert!(Auto::Tasks.runs(&p("todo", false)));
-        assert!(Auto::Tasks.runs(&p("reminder", true)));
-        assert!(!Auto::Tasks.runs(&p("reminder", false)));
-        assert!(!Auto::Tasks.runs(&p("agent", false)));
-        assert!(Auto::All.runs(&p("agent", false)));
-        assert!(!Auto::None.runs(&p("todo", false)));
+        assert!(Auto::Tasks.runs(&p("todo", false), false));
+        assert!(Auto::Tasks.runs(&p("reminder", true), false));
+        assert!(!Auto::Tasks.runs(&p("reminder", false), false));
+        // A question to a chat AI runs at once; Cursor's repository work waits.
+        assert!(Auto::Tasks.runs(&p("agent", false), false));
+        assert!(!Auto::Tasks.runs(&p("agent", false), true));
+        assert!(Auto::All.runs(&p("agent", false), true));
+        assert!(!Auto::None.runs(&p("agent", false), false));
+        assert!(!Auto::None.runs(&p("todo", false), false));
     }
 
     #[test]

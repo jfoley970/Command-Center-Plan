@@ -437,6 +437,14 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             pocket::set_options(core, &wake, auto, ai, &ai_model)?;
             ok(core.pocket.snapshot(core)?)
         }
+        "pocket_set_triggers" => {
+            #[derive(Deserialize)]
+            struct A {
+                triggers: Vec<pocket::Trigger>,
+            }
+            pocket::set_triggers(core, args::<A>(a)?.triggers)?;
+            ok(core.pocket.snapshot(core)?)
+        }
         "pocket_run" => {
             #[derive(Deserialize)]
             struct A {

@@ -3,7 +3,7 @@ import { errorText } from "../api";
 import { ago } from "../atera";
 import { useData } from "../data";
 import { useLiveSnapshot } from "../live";
-import { AUTO_LABEL, pocket, type PocketAuto, type PocketCommand, type PocketKind } from "../pocket";
+import { AUTO_LABEL, pocket, type PocketAuto, type PocketCommand, type PocketKind, type PocketTrigger } from "../pocket";
 import { formatWhen, fromLocalInput, toLocalInput } from "../time";
 import { keyStore, onServer } from "../transport";
 import Widget from "./Widget";
@@ -143,6 +143,68 @@ function PendingRow({ c, onDone }: { c: PocketCommand; onDone: () => void }) {
   );
 }
 
+/** Your own trigger words and what each one does. */
+function TriggerWords({ saved, onSaved }: { saved: PocketTrigger[]; onSaved: () => void }) {
+  const { agents, providers } = useData();
+  const [rows, setRows] = useState<PocketTrigger[]>(saved);
+  const [err, setErr] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const savedKey = JSON.stringify(saved);
+  useEffect(() => setRows(saved), [savedKey]);
+
+  const targets: { value: string; label: string }[] = [
+    ...providers.filter((p) => !p.unavailable && p.id !== "cursor").map((p) => ({ value: `provider:${p.id}`, label: `Ask ${p.name}` })),
+    ...agents.map((a) => ({ value: `agent:${a.id}`, label: `Ask ${a.name}` })),
+    ...providers.filter((p) => p.id === "cursor").map((p) => ({ value: `provider:${p.id}`, label: `Send to ${p.name}` })),
+    { value: "todo", label: "Add a todo" },
+    { value: "reminder", label: "Set a reminder" },
+    { value: "project", label: "Start a project" },
+  ];
+  const set = (i: number, t: Partial<PocketTrigger>) => setRows((r) => r.map((row, j) => (j === i ? { ...row, ...t } : row)));
+  const changed = JSON.stringify(rows.map(({ word, target }) => ({ word, target }))) !== JSON.stringify(saved.map(({ word, target }) => ({ word, target })));
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    try {
+      await pocket.setTriggers(rows.filter((r) => r.word.trim()));
+      setDone(true);
+      setTimeout(() => setDone(false), 2000);
+    } catch (e) {
+      setErr(errorText(e));
+    } finally {
+      onSaved();
+    }
+  }
+
+  return (
+    <form className="stack-tight" onSubmit={save} aria-label="Trigger words">
+      <strong className="small">Trigger words</strong>
+      <p className="muted small">
+        Pick a word and what it does. A recording that opens with it, or a command after the wake phrase, goes there:
+        “Jeeves, what's on my calendar” asks Claude, “Note, buy cable” adds a todo.
+      </p>
+      {rows.map((r, i) => (
+        <div className="form-row" key={i}>
+          <input className="grow" value={r.word} onChange={(e) => set(i, { word: e.target.value })} placeholder="Word, such as Jeeves" aria-label="Trigger word" />
+          <select className="grow" value={r.target} onChange={(e) => set(i, { target: e.target.value })} aria-label={`What ${r.word || "this word"} does`}>
+            {!targets.some((t) => t.value === r.target) && <option value={r.target}>{r.target_name || "Pick one"}</option>}
+            {targets.map((t) => (
+              <option key={t.value} value={t.value}>{t.label}</option>
+            ))}
+          </select>
+          <button type="button" className="ghost" onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))} aria-label={`Remove ${r.word || "trigger"}`}>Remove</button>
+        </div>
+      ))}
+      <div className="form-row">
+        <button type="button" className="ghost" onClick={() => setRows((rs) => [...rs, { word: "", target: targets[0]?.value ?? "todo" }])}>Add a trigger word</button>
+        <button type="submit" disabled={!changed}>{done ? "Saved" : "Save trigger words"}</button>
+      </div>
+      {err && <p className="atera-error">{err}</p>}
+    </form>
+  );
+}
+
 /** Key, wake phrase, auto-run and (on the server) webhook. Shared with Settings > Connections. */
 export function PocketSetup() {
   const { snap, reload } = usePocket();
@@ -255,10 +317,13 @@ export function PocketSetup() {
       <p className="muted small">
         Start a recording with the wake phrase, then say what you want: “add a todo to renew the domain”, “remind me at 3 PM
         to call Dana”, “Cursor, fix the login bug” or an agent's name. Say the wake phrase again for another command in
-        the same recording. When the simple rules can't tell what you meant, the local AI on the server reads the command
-        instead, so it never leaves your server. Recordings that don't start with the wake phrase are ignored and nothing
-        from them is kept.
+        the same recording. You can also skip the wake phrase and open with an AI's name: “Claude, …”, “Grok, …”,
+        “ChatGPT, …” or one of your agents. The whole recording goes to it and the answer shows in the Agents widget.
+        When the simple rules can't tell what you meant, the local AI on the server reads the command instead, so it never
+        leaves your server. Recordings that start with none of these are ignored and nothing from them is kept.
       </p>
+
+      <TriggerWords saved={snap?.triggers ?? []} onSaved={reload} />
 
       {onServer && (
         <>
