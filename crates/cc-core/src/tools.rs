@@ -114,15 +114,18 @@ pub const TOOLS: &[Tool] = &[
         name: "update_todo",
         group: "todos",
         tier: Tier::Do,
-        description: "Mark a todo done or not done, change its priority, or replace its notes. Name it by id (from list_todos) or by title.",
+        description: "Change a todo: its due date, done or not, priority, notes, title or project. Name it by id (from list_todos) or by title. Pass only the fields to change.",
         params: || {
             (
                 json!({
                     "id": { "type": "integer" },
-                    "title": { "type": "string", "description": "The todo's title, or part of it, when you don't have its id" },
+                    "title": { "type": "string", "description": "The todo's current title, or part of it, when you don't have its id" },
+                    "due": { "type": "string", "description": format!("New due date: {WHEN}. Or \"none\" to clear it.") },
                     "done": { "type": "boolean" },
                     "priority": { "type": "string", "enum": ["high", "normal", "low"] },
-                    "notes": { "type": "string" }
+                    "notes": { "type": "string", "description": "Replaces the notes" },
+                    "rename_to": { "type": "string", "description": "A new title" },
+                    "project": { "type": "string", "description": "Name of an existing project to move it to, or \"none\"" }
                 }),
                 &[],
             )
@@ -874,7 +877,9 @@ async fn exec(core: &Arc<Core>, tool: &Tool, a: &Value) -> Result<(String, Strin
                 "project_id": project_id(core, s(a, "project"))?,
             });
             let t: db::Todo = serde_json::from_value(call("add_todo", json!({ "todo": todo })).await?).map_err(|e| e.to_string())?;
-            Ok((format!("Added todo #{}: {}", t.id, t.title), format!("Added todo “{}”", t.title)))
+            // Stating the due date (or its absence) keeps the reply from inventing one.
+            let due = t.due_at.as_deref().map(|d| format!("due {}", local(d))).unwrap_or_else(|| "no due date".into());
+            Ok((format!("Added todo #{}: {} ({due}).", t.id, t.title), format!("Added todo “{}”", t.title)))
         }
         "update_todo" => {
             let todo = find_todo(core, a)?;
@@ -888,15 +893,36 @@ async fn exec(core: &Arc<Core>, tool: &Tool, a: &Value) -> Result<(String, Strin
                 call("set_todo_priority", json!({ "id": id, "priority": p })).await?;
                 did.push(["", "set to high priority", "set to normal priority", "set to low priority"][p as usize]);
             }
+            let mut did: Vec<String> = did.into_iter().map(String::from).collect();
             if let Some(notes) = a["notes"].as_str() {
                 call("set_todo_notes", json!({ "id": id, "notes": notes })).await?;
-                did.push("notes updated");
+                did.push("notes updated".into());
+            }
+            if let Some(due) = s(a, "due") {
+                if ["none", "null", "no date", "clear"].contains(&due.to_lowercase().as_str()) {
+                    call("set_todo_due", json!({ "id": id, "due_at": null })).await?;
+                    did.push("due date cleared".into());
+                } else {
+                    let at = parse_when(&due)?;
+                    call("set_todo_due", json!({ "id": id, "due_at": at })).await?;
+                    did.push(format!("due {}", local(&at)));
+                }
+            }
+            if let Some(name) = s(a, "rename_to") {
+                call("rename_todo", json!({ "id": id, "title": name })).await?;
+                did.push(format!("renamed to “{name}”"));
+            }
+            if let Some(p) = s(a, "project") {
+                let pid = if p.eq_ignore_ascii_case("none") { None } else { project_id(core, Some(p.clone()))? };
+                call("set_todo_project", json!({ "id": id, "project_id": pid })).await?;
+                did.push(if pid.is_some() { format!("moved to project {p}") } else { "taken out of its project".into() });
             }
             if did.is_empty() {
-                return Err("Nothing to change: pass done, priority or notes.".into());
+                return Err("Nothing changed: pass only the field the user asked to change (due, done, priority, notes, rename_to or project).".into());
             }
             let what = did.join(", ");
-            Ok((format!("Todo #{id} \"{}\": {what}.", todo.title), format!("Todo “{}”: {what}", todo.title)))
+            // Saying what changed, and only that, keeps the reply from claiming more.
+            Ok((format!("Todo #{id} \"{}\": {what}. Nothing else about it changed.", todo.title), format!("Todo “{}”: {what}", todo.title)))
         }
 
         "list_reminders" => {
