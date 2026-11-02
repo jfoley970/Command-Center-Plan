@@ -319,7 +319,7 @@ pub const TOOLS: &[Tool] = &[
         name: "ask_ai",
         group: "agents",
         tier: Tier::Ask,
-        description: "Ask one of the user's cloud AIs (Grok, ChatGPT or Claude) a question; its answer shows in its own chat. Costs money, so it waits for the user's approval.",
+        description: "Ask one of the user's cloud AIs (Grok, ChatGPT or Claude) a question; its answer shows in its own chat. Grok is asked at once; ChatGPT and Claude cost more, so they wait for the user's approval.",
         params: || {
             (
                 json!({
@@ -601,7 +601,12 @@ pub async fn run(core: &Arc<Core>, ctx: Ctx, name: &str, a: &Value) -> (String, 
     };
     if tool.tier == Tier::Ask {
         return match ask(core, ctx, tool, a).await {
-            Ok(summary) => (
+            // Grok runs without a tap (James, 2026-11-02); its answer is added once this reply is in.
+            Ok((summary, true)) => (
+                format!("Done: {summary}. Its answer will be added under your reply; don't make one up."),
+                used(summary, true, false),
+            ),
+            Ok((summary, false)) => (
                 format!("Waiting for the user's approval: {summary}. It has NOT happened yet; tell the user it's waiting for their Approve tap."),
                 used(format!("Waiting for approval: {summary}"), true, true),
             ),
@@ -617,7 +622,11 @@ pub async fn run(core: &Arc<Core>, ctx: Ctx, name: &str, a: &Value) -> (String, 
 /// Checks an ask-first call and queues it. Mail goes into the inbox's own
 /// approval queue (`mail::change_mail` queues every send and delete); the rest
 /// into `tool_approvals`, run by `commands::approve_tool`. Returns the summary.
-async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<String, String> {
+///
+/// The bool says the action runs without a tap: asking Grok. It is still
+/// recorded here, marked `auto`, and `commands::run_agent` carries it out once
+/// Local AI's reply is in.
+async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<(String, bool), String> {
     let (args, summary) = match tool.name {
         "delete_todo" => {
             let todo = find_todo(core, a)?;
@@ -632,7 +641,7 @@ async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<Strin
             let name = db::list_projects(&core.db.0.lock().unwrap()).map_err(|e| e.to_string())?.into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
             (json!({ "id": id }), format!("Delete project “{name}” (its todos stay)"))
         }
-        "send_email" | "reply_email" | "delete_email" => return ask_mail(core, tool.name, a).await,
+        "send_email" | "reply_email" | "delete_email" => return ask_mail(core, tool.name, a).await.map(|s| (s, false)),
         "ask_ai" => {
             let ai = s(a, "ai").unwrap_or_default().to_lowercase();
             let p = crate::providers::find(&ai).filter(|p| matches!(p.id, "grok" | "chatgpt" | "claude")).ok_or("ai must be grok, chatgpt or claude.")?;
@@ -642,7 +651,8 @@ async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<Strin
                 }
             }
             let q = s(a, "question").ok_or("What should it be asked?")?;
-            (json!({ "ai": p.id, "question": q }), format!("Ask {}: “{}”", p.name, one_line(&q, 120)))
+            let auto = runs_without_asking(p.id);
+            (json!({ "ai": p.id, "question": q, "auto": auto }), format!("Ask {}: “{}”", p.name, one_line(&q, 120)))
         }
         "cursor_task" => {
             let want = s(a, "agent").map(|n| n.to_lowercase());
@@ -658,13 +668,22 @@ async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<Strin
         }
         other => return Err(format!("{other} isn't wired up.")),
     };
+    let auto = args["auto"].as_bool() == Some(true);
     {
         let conn = core.db.0.lock().unwrap();
         db::add_tool_approval(&conn, ctx.run_id, ctx.agent_id, tool.name, &args.to_string(), &summary).map_err(|e| e.to_string())?;
     }
-    core.changed("approvals-changed");
-    core.notify("Approve a Local AI action", &summary);
-    Ok(summary)
+    if !auto {
+        core.changed("approvals-changed");
+        core.notify("Approve a Local AI action", &summary);
+    }
+    Ok((summary, auto))
+}
+
+/// Cloud AIs Local AI may ask without a tap. Grok only (James, 2026-11-02);
+/// ChatGPT and Claude still ask first.
+pub fn runs_without_asking(ai: &str) -> bool {
+    ai == "grok"
 }
 
 fn recipients(to: &str) -> Result<Vec<Value>, String> {
