@@ -121,13 +121,14 @@ pub async fn complete(model: &str, system: &str, history: &History, user: &str) 
 
 /// One step of a chat that can call tools: Ollama's answer message (which may
 /// hold `tool_calls` instead of text) plus its token counts. Thinking is off, so
-/// each step of a tool loop stays quick on a small GPU.
-pub async fn chat_step(model: &str, messages: &[Value], tools: &[Value]) -> Result<(Value, Completion), String> {
+/// each step of a tool loop stays quick on a small GPU, unless `think` asks for
+/// it (a retry after the model skipped a tool it needed).
+pub async fn chat_step(model: &str, messages: &[Value], tools: &[Value], think: bool) -> Result<(Value, Completion), String> {
     let mut body = json!({
         "model": model,
         "messages": messages,
         "stream": false,
-        "think": false,
+        "think": think,
         "options": { "num_ctx": num_ctx() },
     });
     if !tools.is_empty() {

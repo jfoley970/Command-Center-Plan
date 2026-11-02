@@ -725,7 +725,9 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         let context = if agent.include_context { day_context(&conn)? } else { String::new() };
         let budget = if provider.local { LOCAL_CHAT_MAX_CHARS } else { CHAT_MAX_CHARS };
         let history = if agent.memory && !provider.background {
-            fit_history(db::chat_history(&conn, agent_id, run_id, CHAT_MAX_EXCHANGES).map_err(err)?, budget)
+            let rows = db::chat_history_runs(&conn, agent_id, run_id, CHAT_MAX_EXCHANGES).map_err(err)?;
+            let rows = if provider.local { rows.into_iter().filter(|(q, a, used)| trustworthy(q, a, used)).collect() } else { rows };
+            fit_history(rows.into_iter().map(|(q, a, _)| (q, a)).collect(), budget)
         } else {
             vec![]
         };
@@ -885,9 +887,9 @@ async fn local_with_tools(
     picked: &[&'static crate::tools::Tool],
 ) -> CmdResult<(claude::Completion, Vec<crate::tools::Used>)> {
     let model = ollama::pick_model(model).await?;
-    let step = |messages: Vec<Value>, tools: Vec<Value>| {
+    let step = |messages: Vec<Value>, tools: Vec<Value>, think: bool| {
         let model = model.clone();
-        async move { ollama::chat_step(&model, &messages, &tools).await }
+        async move { ollama::chat_step(&model, &messages, &tools, think).await }
     };
     tool_loop(core, asked, system, history, user, picked, step).await
 }
@@ -903,7 +905,8 @@ async fn tool_loop<F, Fut>(
     step: F,
 ) -> CmdResult<(claude::Completion, Vec<crate::tools::Used>)>
 where
-    F: Fn(Vec<Value>, Vec<Value>) -> Fut,
+    // (messages, tools, think): `think` is on for the retry after a check.
+    F: Fn(Vec<Value>, Vec<Value>, bool) -> Fut,
     Fut: std::future::Future<Output = Result<(Value, claude::Completion), String>>,
 {
     let schema = crate::tools::schema(picked);
@@ -916,7 +919,7 @@ where
         // The last round offers no tools, so the model has to answer.
         let offer: Vec<Value> = if round == TOOL_ROUNDS { vec![] } else { schema.clone() };
         let no_tools = offer.is_empty();
-        let (message, c) = step(messages.clone(), offer).await?;
+        let (message, c) = step(messages.clone(), offer, nudged).await?;
         input_tokens += c.input_tokens;
         output_tokens += c.output_tokens;
         let calls = ollama::tool_calls(&message);
@@ -932,13 +935,16 @@ where
                 None
             };
             if let (Some(n), false, false) = (nudge, nudged, no_tools) {
+                // The wrong answer is left out, so the model doesn't read its own
+                // "done" back; the request is repeated, and it may think this time.
                 nudged = true;
-                messages.push(serde_json::json!({ "role": "assistant", "content": c.text }));
-                messages.push(serde_json::json!({ "role": "user", "content": n }));
+                messages.push(serde_json::json!({ "role": "user", "content": format!("{n}\n\nThe request: {}", asked.input) }));
                 continue;
             }
             let mut text = if c.text.is_empty() && !used.is_empty() { "Done.".to_string() } else { c.text };
-            if wants && !crate::tools::changed(&used) && claims_change(&text) {
+            if wants && !crate::tools::changed(&used) {
+                // Even an answer that doesn't claim anything gets this, so a failed
+                // change is never silent.
                 text.push_str(NOTHING_CHANGED);
             }
             return Ok((claude::Completion { text, input_tokens, output_tokens, ..c }, used));
@@ -965,6 +971,15 @@ where
     Err("Local AI kept calling tools without answering.".into())
 }
 
+/// Whether an earlier Local AI exchange is safe to show the model again. One
+/// that went wrong (a failed tool, a change asked for that no tool made) teaches
+/// a small model to repeat the mistake, so it is left out of the chat it sees.
+fn trustworthy(asked: &str, answer: &str, used: &[crate::tools::Used]) -> bool {
+    !answer.contains(NOTHING_CHANGED.trim())
+        && used.iter().all(|u| u.ok)
+        && !(crate::tools::wants_change(asked) && !crate::tools::changed(used))
+}
+
 /// What the user asked, apart from the day's context sent with it.
 pub(crate) struct Asked<'a> {
     /// The run the tools report into.
@@ -975,24 +990,11 @@ pub(crate) struct Asked<'a> {
     pub about_data: bool,
 }
 
-const NUDGE_CHANGE: &str = "(Command Center check, not from the user.) You haven't called a tool for this, so nothing has changed yet. \
-If the user asked for a change, call the tool for it now; name the item by its title if you don't have its id. \
-If you can't do it, say plainly that you didn't.";
-const NUDGE_LOOK: &str = "(Command Center check, not from the user.) Your earlier answers in this chat may be out of date. \
-Call a tool to get the current data, then answer from what it returns.";
+const NUDGE_CHANGE: &str = "[Command Center] No tool was called, so nothing has changed. Call the tool that does this now \
+(name the item by its title if you don't have its id). Earlier replies in this chat that say \"done\" may be wrong.";
+const NUDGE_LOOK: &str = "[Command Center] Your earlier answers may be out of date. Call a tool to get the current data, then answer from it.";
 /// Added to an answer that claims a change no tool made.
-const NOTHING_CHANGED: &str = "\n\n(Command Center: nothing was actually changed. Local AI didn't complete a tool for this, so please check or ask again.)";
-
-/// Whether an answer says something was changed.
-fn claims_change(text: &str) -> bool {
-    let t = text.to_lowercase();
-    [
-        "added", "marked", "deleted", "removed", "moved", "snoozed", "created", "updated", "completed", "rescheduled", "is set",
-        "have set", "i've set", "i set", "sent", "started", "paused", "reset", "renamed", "done",
-    ]
-    .iter()
-    .any(|w| t.contains(w))
-}
+const NOTHING_CHANGED: &str = "\n\n(Command Center: nothing was changed. Local AI didn't complete a tool for this, so please check or ask again.)";
 
 const LEARN_SYSTEM: &str = "You keep an AI assistant's long-term memory: a short list of lasting facts about its user. \
 You get the current list (numbered) and the newest exchange. Answer with JSON: \
@@ -1183,7 +1185,7 @@ mod tests {
         let core = core();
         let picked = crate::tools::pick("add a todo to call Dell", "");
         let seen = std::sync::Mutex::new(vec![]);
-        let step = |messages: Vec<Value>, tools: Vec<Value>| {
+        let step = |messages: Vec<Value>, tools: Vec<Value>, _think: bool| {
             seen.lock().unwrap().push((messages, tools.len()));
             let round = seen.lock().unwrap().len();
             let c = |text: &str| claude::Completion { text: text.into(), stop_reason: "end_turn".into(), model: "qwen3:8b".into(), input_tokens: 10, output_tokens: 2 };
@@ -1271,7 +1273,7 @@ mod tests {
 
         // Claims it twice without a tool: sent back once, then flagged.
         let (seen, script) = scripted(vec![json!({ "content": "Todo marked as done." }), json!({ "content": "Done, it's marked as done." })]);
-        let step = |m: Vec<Value>, _: Vec<Value>| {
+        let step = |m: Vec<Value>, _: Vec<Value>, _: bool| {
             seen.lock().unwrap().push(m);
             let msg = script.lock().unwrap().pop_front().unwrap();
             let comp = c(msg["content"].as_str().unwrap());
@@ -1283,7 +1285,10 @@ mod tests {
         {
             let seen = seen.lock().unwrap();
             assert_eq!(seen.len(), 2);
-            assert_eq!(seen[1].last().unwrap()["content"], NUDGE_CHANGE);
+            let last = seen[1].last().unwrap();
+            assert!(last["content"].as_str().unwrap().starts_with(NUDGE_CHANGE) && last["content"].as_str().unwrap().ends_with(input));
+            // The false "done" isn't fed back.
+            assert!(!seen[1].iter().any(|m| m["content"] == "Todo marked as done."));
         }
         assert!(!db::list_todos(&core.db.0.lock().unwrap()).unwrap()[0].done);
 
@@ -1293,7 +1298,7 @@ mod tests {
             json!({ "content": "", "tool_calls": [{ "function": { "name": "update_todo", "arguments": { "id": 1234, "title": "test local ai tools", "done": true } } }] }),
             json!({ "content": "Marked “Test Local AI tools” done." }),
         ]);
-        let step = |_: Vec<Value>, _: Vec<Value>| {
+        let step = |_: Vec<Value>, _: Vec<Value>, _: bool| {
             let msg = script.lock().unwrap().pop_front().unwrap();
             let comp = c(msg["content"].as_str().unwrap());
             async move { Ok((msg, comp)) }
@@ -1302,6 +1307,17 @@ mod tests {
         assert_eq!(answer.text, "Marked “Test Local AI tools” done.");
         assert!(used[0].ok, "{:?}", used);
         assert!(db::list_todos(&core.db.0.lock().unwrap()).unwrap()[0].done);
+    }
+
+    #[test]
+    fn bad_exchanges_stay_out_of_the_chat() {
+        let u = |tool: &str, ok: bool| crate::tools::Used { tool: tool.into(), label: String::new(), ok, waiting: false };
+        assert!(trustworthy("hi", "Hello.", &[]));
+        assert!(trustworthy("add a todo: buy milk", "Added.", &[u("add_todo", true)]));
+        assert!(!trustworthy("mark the test todo done", "Todo marked as done.", &[]), "old unflagged false claim");
+        assert!(!trustworthy("what's due?", &format!("Nothing.{NOTHING_CHANGED}"), &[]));
+        assert!(!trustworthy("delete the todo", "Gone.", &[u("delete_todo", false)]));
+        assert!(trustworthy("delete the todo", "Waiting for you.", &[u("delete_todo", true)]));
     }
 
     #[tokio::test]
@@ -1315,7 +1331,7 @@ mod tests {
             json!({ "content": "", "tool_calls": [{ "function": { "name": "unifi_sites", "arguments": { "problems_only": true } } }] }),
             json!({ "content": "UniFi isn't connected." }),
         ]);
-        let step = |m: Vec<Value>, _: Vec<Value>| {
+        let step = |m: Vec<Value>, _: Vec<Value>, _: bool| {
             seen.lock().unwrap().push(m);
             let msg = script.lock().unwrap().pop_front().unwrap();
             let comp = claude::Completion { text: msg["content"].as_str().unwrap().into(), stop_reason: "end_turn".into(), model: String::new(), input_tokens: 0, output_tokens: 0 };
@@ -1324,9 +1340,7 @@ mod tests {
         let (answer, used) = tool_loop(&core, &asked, "sys", &[], input, &picked, step).await.unwrap();
         assert_eq!(answer.text, "UniFi isn't connected.");
         assert_eq!(used[0].tool, "unifi_sites");
-        assert_eq!(seen.lock().unwrap()[1].last().unwrap()["content"], NUDGE_LOOK);
-        // A plain chat isn't sent back.
-        assert!(!claims_change("Hi Master Chief.") && claims_change("I've added it."));
+        assert!(seen.lock().unwrap()[1].last().unwrap()["content"].as_str().unwrap().starts_with(NUDGE_LOOK));
     }
 
     #[tokio::test]
@@ -1334,7 +1348,7 @@ mod tests {
         let core = core();
         let picked = crate::tools::pick("todos", "");
         let rounds = std::sync::Mutex::new(vec![]);
-        let step = |_: Vec<Value>, tools: Vec<Value>| {
+        let step = |_: Vec<Value>, tools: Vec<Value>, _: bool| {
             rounds.lock().unwrap().push(tools.len());
             let c = claude::Completion { text: String::new(), stop_reason: "end_turn".into(), model: String::new(), input_tokens: 0, output_tokens: 0 };
             let msg = if tools.is_empty() {

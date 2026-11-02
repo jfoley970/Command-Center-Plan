@@ -1442,6 +1442,23 @@ pub fn chat_history(conn: &Connection, agent_id: i64, run_id: i64, max: i64) -> 
     Ok(rows)
 }
 
+/// Like `chat_history`, with the tools each answer used.
+pub fn chat_history_runs(conn: &Connection, agent_id: i64, run_id: i64, max: i64) -> rusqlite::Result<Vec<(String, String, Vec<crate::tools::Used>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.input, r.output, r.tools FROM agent_runs r JOIN agents a ON a.id = r.agent_id
+         WHERE r.agent_id = ?1 AND r.id < ?2 AND r.status = 'done' AND r.input != '(no extra input)'
+           AND (a.chat_since IS NULL OR r.started_at > a.chat_since)
+         ORDER BY r.id DESC LIMIT ?3",
+    )?;
+    let mut rows = stmt
+        .query_map(params![agent_id, run_id, max], |r| {
+            Ok((r.get(0)?, r.get(1)?, serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default()))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct AgentMemory {
     pub id: i64,
