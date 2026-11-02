@@ -64,6 +64,13 @@ services:
       OLLAMA_KEEP_ALIVE: 30m
       # One model in memory at a time; an 8 GB card can't hold two 8B models.
       OLLAMA_MAX_LOADED_MODELS: 1
+      # Chat memory needs a bigger context window (8k, set per request by
+      # cc-server; CC_OLLAMA_NUM_CTX changes it). An 8-bit KV cache keeps that
+      # in about the same GPU memory as Ollama's smaller default, so qwen3:8b
+      # still fits beside Whisper on an 8 GB card. Needs flash attention.
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      OLLAMA_CONTEXT_LENGTH: 8192
     volumes:
       - ollama:/root/.ollama
     expose:

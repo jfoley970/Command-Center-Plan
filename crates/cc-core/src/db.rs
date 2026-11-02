@@ -129,6 +129,15 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     finished_at   TEXT
 );
 
+-- What an agent remembers about the user across chats (long-term memory).
+-- Short facts, picked out of finished exchanges; the user can delete any.
+CREATE TABLE IF NOT EXISTS agent_memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id   INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    fact       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 -- Voice commands heard on Pocket recordings. Only the words after the wake
 -- phrase are kept, never the rest of a transcript.
 CREATE TABLE IF NOT EXISTS pocket_commands (
@@ -215,6 +224,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // with it on; other existing agents keep answering each run on its own.
     if !has_column(conn, "agents", "memory")? {
         conn.execute_batch("ALTER TABLE agents ADD COLUMN memory INTEGER NOT NULL DEFAULT 0; UPDATE agents SET memory = 1 WHERE provider = 'grok';")?;
+    }
+    // Local AI agents were made with memory off. Turn it on once, so they keep
+    // the chat and learn across chats; the user can still turn it off.
+    if get_setting(conn, "migrated.local_memory")?.is_none() {
+        conn.execute("UPDATE agents SET memory = 1 WHERE provider = 'local'", [])?;
+        set_setting(conn, "migrated.local_memory", "1")?;
     }
     if !has_column(conn, "pocket_commands", "link")? {
         conn.execute_batch("ALTER TABLE pocket_commands ADD COLUMN link TEXT NOT NULL DEFAULT ''")?;
@@ -1319,6 +1334,57 @@ pub fn chat_history(conn: &Connection, agent_id: i64, run_id: i64, max: i64) -> 
     Ok(rows)
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AgentMemory {
+    pub id: i64,
+    pub agent_id: i64,
+    pub fact: String,
+    pub created_at: String,
+}
+
+/// At most this many facts per agent; adding more drops the oldest.
+pub const MAX_MEMORIES: i64 = 40;
+
+/// An agent's long-term memory, oldest first.
+pub fn list_memories(conn: &Connection, agent_id: i64) -> rusqlite::Result<Vec<AgentMemory>> {
+    let mut stmt = conn.prepare("SELECT id, agent_id, fact, created_at FROM agent_memories WHERE agent_id = ?1 ORDER BY id")?;
+    let rows = stmt.query_map([agent_id], |r| Ok(AgentMemory { id: r.get(0)?, agent_id: r.get(1)?, fact: r.get(2)?, created_at: r.get(3)? }))?;
+    rows.collect()
+}
+
+/// Adds the facts not already remembered (ignoring case), then keeps only the
+/// newest `MAX_MEMORIES`. Returns how many were added.
+pub fn add_memories(conn: &Connection, agent_id: i64, facts: &[String]) -> rusqlite::Result<usize> {
+    let known: Vec<String> = list_memories(conn, agent_id)?.into_iter().map(|m| m.fact.to_lowercase()).collect();
+    let mut added = 0;
+    let mut seen = known;
+    for fact in facts {
+        let fact = fact.trim();
+        if fact.is_empty() || fact.len() > 300 || seen.contains(&fact.to_lowercase()) {
+            continue;
+        }
+        conn.execute("INSERT INTO agent_memories (agent_id, fact, created_at) VALUES (?1, ?2, ?3)", params![agent_id, fact, now()])?;
+        seen.push(fact.to_lowercase());
+        added += 1;
+    }
+    conn.execute(
+        "DELETE FROM agent_memories WHERE agent_id = ?1 AND id NOT IN
+           (SELECT id FROM agent_memories WHERE agent_id = ?1 ORDER BY id DESC LIMIT ?2)",
+        params![agent_id, MAX_MEMORIES],
+    )?;
+    Ok(added)
+}
+
+pub fn delete_memory(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM agent_memories WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+pub fn clear_memories(conn: &Connection, agent_id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM agent_memories WHERE agent_id = ?1", [agent_id])?;
+    Ok(())
+}
+
 pub fn delete_agent(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM agents WHERE id = ?1", [id])?;
     Ok(())
@@ -1719,6 +1785,26 @@ mod tests {
         assert!(add_reminder(&c, NewReminder { title: "x".into(), remind_at: "tomorrow".into(), repeat: "none".into(), project_id: None }).is_err());
         let t = chrono::Utc::now().to_rfc3339();
         assert!(add_reminder(&c, NewReminder { title: "x".into(), remind_at: t, repeat: "hourly".into(), project_id: None }).is_err());
+    }
+
+    #[test]
+    fn memories_dedupe_cap_and_clear() {
+        let c = mem();
+        let a = save_agent(&c, AgentInput { id: None, name: "L".into(), description: String::new(), system_prompt: String::new(), model: String::new(), provider: "local".into(), repo: String::new(), include_context: false, memory: true }).unwrap().id;
+        let f = |s: &str| s.to_string();
+        assert_eq!(add_memories(&c, a, &[f("Likes tea"), f("likes TEA"), f(" "), f("Has a dog")]).unwrap(), 2);
+        assert_eq!(add_memories(&c, a, &[f("Has a dog")]).unwrap(), 0);
+        let facts: Vec<String> = list_memories(&c, a).unwrap().into_iter().map(|m| m.fact).collect();
+        assert_eq!(facts, vec![f("Likes tea"), f("Has a dog")]);
+        let many: Vec<String> = (0..MAX_MEMORIES + 5).map(|i| format!("fact {i}")).collect();
+        add_memories(&c, a, &many).unwrap();
+        let kept = list_memories(&c, a).unwrap();
+        assert_eq!(kept.len() as i64, MAX_MEMORIES);
+        assert_eq!(kept.last().unwrap().fact, format!("fact {}", MAX_MEMORIES + 4));
+        delete_memory(&c, kept[0].id).unwrap();
+        assert_eq!(list_memories(&c, a).unwrap().len() as i64, MAX_MEMORIES - 1);
+        clear_memories(&c, a).unwrap();
+        assert!(list_memories(&c, a).unwrap().is_empty());
     }
 
     #[test]

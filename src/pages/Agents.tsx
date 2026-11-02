@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { MIC } from "../icons";
-import { api, type Agent, type AgentRun, type ProviderId } from "../api";
+import { api, type Agent, type AgentMemory, type AgentRun, type ProviderId } from "../api";
 import { useData } from "../data";
 import { formatWhen } from "../time";
-import { openUrl } from "../transport";
+import { listen, openUrl } from "../transport";
 
 type Draft = Pick<Agent, "name" | "description" | "system_prompt" | "model" | "provider" | "repo" | "include_context" | "memory"> & { id?: number };
 
@@ -126,7 +126,9 @@ export default function Agents({ selectedId, onSelect }: { selectedId: number | 
             {!draftProvider?.background && (
               <label className="row">
                 <input type="checkbox" checked={draft.memory} onChange={(e) => setDraft({ ...draft, memory: e.target.checked })} />
-                Remember the conversation (each message sends the last 10 exchanges)
+                {draft.provider === "local"
+                  ? "Remember the conversation and learn facts about you that last across chats"
+                  : "Remember the conversation (each message sends the last 10 exchanges)"}
               </label>
             )}
             <div className="row">
@@ -169,7 +171,11 @@ function AgentChat({ agent, onEdit, onDelete }: { agent: Agent; onEdit: () => vo
   const current = since ? thread.filter((r) => r.started_at > since) : thread;
   const shown = showEarlier ? thread : current;
 
-  useEffect(() => end.current?.scrollIntoView({ block: "end" }), [shown.length, shown[shown.length - 1]?.status]);
+  // Braces matter: newer browsers return a Promise from scrollIntoView, and
+  // React treats anything an effect returns as its cleanup function.
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "end" });
+  }, [shown.length, shown[shown.length - 1]?.status]);
 
   async function send(e?: FormEvent) {
     e?.preventDefault();
@@ -204,7 +210,7 @@ function AgentChat({ agent, onEdit, onDelete }: { agent: Agent; onEdit: () => vo
             {provider?.name}
             {agent.repo && ` · ${agent.repo}`}
             {agent.description && ` · ${agent.description}`}
-            {agent.memory && !provider?.background && " · remembers this chat"}
+            {agent.memory && !provider?.background && (agent.provider === "local" ? " · remembers this chat and you" : " · remembers this chat")}
           </p>
         </div>
         <div className="row">
@@ -213,6 +219,8 @@ function AgentChat({ agent, onEdit, onDelete }: { agent: Agent; onEdit: () => vo
           <button className="ghost" onClick={onDelete}>Delete</button>
         </div>
       </div>
+
+      {agent.memory && agent.provider === "local" && <MemoryPanel agent={agent} />}
 
       <div className="chat-thread" aria-live="polite">
         {earlier.length > 0 && (
@@ -280,5 +288,60 @@ function AgentChat({ agent, onEdit, onDelete }: { agent: Agent; onEdit: () => vo
       </form>
       {provider && !provider.connected && <p className="muted small">Add your {provider.name} key in Settings &gt; Connections first.</p>}
     </section>
+  );
+}
+
+/** What a Local AI agent has learned about you, with a way to forget any of it. */
+function MemoryPanel({ agent }: { agent: Agent }) {
+  const { act } = useData();
+  const [facts, setFacts] = useState<AgentMemory[]>([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    const load = () => api.listMemories(agent.id).then((f) => live && setFacts(f)).catch(() => {});
+    load();
+    const off = listen("memories-changed", load);
+    return () => {
+      live = false;
+      off.then((f) => f());
+    };
+  }, [agent.id]);
+
+  async function forgetAll() {
+    if (!confirm(`Make ${agent.name} forget everything it has learned about you? Chats stay as they are.`)) return;
+    await act(() => api.clearMemories(agent.id));
+  }
+
+  return (
+    <div className="memory-panel">
+      <button className="ghost small" onClick={() => setOpen(!open)} aria-expanded={open}>
+        {open ? "Hide" : "Show"} what {agent.name} remembers about you ({facts.length})
+      </button>
+      {open && (
+        <div className="memory-list">
+          {facts.length === 0 ? (
+            <p className="muted small">
+              Nothing yet. As you chat, {agent.name} saves lasting facts here, such as your name, preferences and projects. Say
+              "remember that…" to add one.
+            </p>
+          ) : (
+            <ul>
+              {facts.map((f) => (
+                <li key={f.id} className="row between">
+                  <span className="grow">{f.fact}</span>
+                  <button className="ghost small" title="Forget this" aria-label={`Forget: ${f.fact}`} onClick={() => act(() => api.deleteMemory(f.id))}>
+                    Forget
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {facts.length > 0 && (
+            <button className="ghost small" onClick={forgetAll}>Forget everything</button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

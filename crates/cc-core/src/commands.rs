@@ -312,6 +312,29 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             core.changed("agents-changed");
             ok(())
         }
+        "list_memories" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                agent_id: i64,
+            }
+            ok(db::list_memories(&conn(), args::<A>(a)?.agent_id).map_err(err)?)
+        }
+        "delete_memory" => {
+            db::delete_memory(&conn(), args::<Id>(a)?.id).map_err(err)?;
+            core.changed("memories-changed");
+            ok(())
+        }
+        "clear_memories" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                agent_id: i64,
+            }
+            db::clear_memories(&conn(), args::<A>(a)?.agent_id).map_err(err)?;
+            core.changed("memories-changed");
+            ok(())
+        }
         "cursor_conversation" => {
             let (_, remote, key) = cursor_run(core, args::<RunId>(a)?.run_id)?;
             ok(cursor::conversation(&key, &remote).await?)
@@ -588,6 +611,15 @@ pub(crate) async fn ask_provider(core: &Arc<Core>, provider: &str, input: String
 /// per message: the last 20 messages (10 exchanges), and at most ~6k tokens.
 const CHAT_MAX_EXCHANGES: i64 = 10;
 const CHAT_MAX_CHARS: usize = 24_000;
+/// A local model sees only `ollama::num_ctx()` tokens in all (8k by default),
+/// and its thinking and answer need room too, so its chat gets ~3.5k tokens.
+const LOCAL_CHAT_MAX_CHARS: usize = 14_000;
+
+/// Whether an agent keeps facts about the user across chats. Local AI only for
+/// now: picking facts out runs on the server's own model, so it costs nothing.
+fn learns(agent: &db::Agent) -> bool {
+    agent.memory && agent.provider == "local"
+}
 
 /// Drops the oldest exchanges until the rest fit in `max_chars`.
 fn fit_history(mut history: Vec<(String, String)>, max_chars: usize) -> Vec<(String, String)> {
@@ -601,8 +633,12 @@ fn fit_history(mut history: Vec<(String, String)>, max_chars: usize) -> Vec<(Str
 /// The agent's own instructions plus a short note on who it is, whether it
 /// remembers the chat, and which other agents exist. Without it a model asked
 /// about "your memory" or "my other bots" says it has none.
-fn agent_system(agent: &db::Agent, others: &[db::Agent]) -> String {
-    let memory = if agent.memory {
+fn agent_system(agent: &db::Agent, others: &[db::Agent], facts: &[String]) -> String {
+    let memory = if learns(agent) {
+        "The earlier messages of this chat are included, so you remember them; older ones drop off once the chat gets long. \
+         You also keep a long-term memory of facts about the user that lasts across chats (listed below when there are any); \
+         new facts from this chat are saved to it automatically after you answer, and the user can see and delete them under Agents."
+    } else if agent.memory {
         "The earlier messages of this chat are included, so you remember them; older ones drop off once the chat gets long."
     } else {
         "Memory is off for you, so each message starts fresh."
@@ -622,6 +658,13 @@ fn agent_system(agent: &db::Agent, others: &[db::Agent]) -> String {
             " The other agents are: {}. You can't see their chats or message them; the user talks to each one by name.",
             names.join(", ")
         ));
+    }
+    if !facts.is_empty() {
+        note.push_str("\n\nWhat you remember about the user from earlier chats (use it when it helps; don't recite it):");
+        for f in facts {
+            note.push_str("\n- ");
+            note.push_str(f);
+        }
     }
     match agent.system_prompt.trim() {
         "" => note,
@@ -654,12 +697,18 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         let input_label = if input.trim().is_empty() { "(no extra input)" } else { input.trim() };
         let run_id = db::start_run(&conn, agent_id, input_label, source).map_err(err)?;
         let context = if agent.include_context { day_context(&conn)? } else { String::new() };
+        let budget = if provider.local { LOCAL_CHAT_MAX_CHARS } else { CHAT_MAX_CHARS };
         let history = if agent.memory && !provider.background {
-            fit_history(db::chat_history(&conn, agent_id, run_id, CHAT_MAX_EXCHANGES).map_err(err)?, CHAT_MAX_CHARS)
+            fit_history(db::chat_history(&conn, agent_id, run_id, CHAT_MAX_EXCHANGES).map_err(err)?, budget)
         } else {
             vec![]
         };
-        let system = agent_system(&agent, &db::list_agents(&conn).map_err(err)?);
+        let facts: Vec<String> = if learns(&agent) {
+            db::list_memories(&conn, agent_id).map_err(err)?.into_iter().map(|m| m.fact).collect()
+        } else {
+            vec![]
+        };
+        let system = agent_system(&agent, &db::list_agents(&conn).map_err(err)?, &facts);
         (run_id, context, history, system)
     };
     core.changed("runs-changed");
@@ -702,7 +751,85 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         db::list_runs(&conn, Some(agent_id), 1).map_err(err)?.remove(0)
     };
     core.changed("runs-changed");
+    if learns(&agent) && run.status == "done" && !input.trim().is_empty() {
+        let (core, agent, said, reply) = (core.clone(), agent.clone(), input.trim().to_string(), run.output.clone());
+        tokio::spawn(async move {
+            if let Err(e) = learn(&core, &agent, &said, &reply).await {
+                eprintln!("long-term memory for {}: {e}", agent.name);
+            }
+        });
+    }
     Ok(run)
+}
+
+const LEARN_SYSTEM: &str = "You keep an AI assistant's long-term memory: a short list of lasting facts about its user. \
+You get the current list (numbered) and the newest exchange. Answer with JSON: \
+\"add\" = new lasting facts the exchange reveals, and \"forget\" = numbers of listed facts that are now wrong, outdated, or the user asked to forget. \
+Worth keeping: the user's name and how to address them, people and pets in their life, their job, projects, tools and devices, \
+preferences and dislikes, plans and dates, standing instructions, and anything they say to remember. \
+Not worth keeping: one-off questions, small talk, facts about the world, what the assistant said or did, or anything already listed. \
+Write each fact as one short sentence about the user in third person, such as \"Prefers metric units.\" \
+Most exchanges have nothing new: then both lists are empty.";
+
+fn learn_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "add": { "type": "array", "items": { "type": "string" } },
+            "forget": { "type": "array", "items": { "type": "integer" } }
+        },
+        "required": ["add", "forget"]
+    })
+}
+
+fn learn_prompt(facts: &[db::AgentMemory], said: &str, reply: &str) -> String {
+    let clip = |t: &str, n: usize| if t.chars().count() <= n { t.to_string() } else { format!("{}…", t.chars().take(n).collect::<String>()) };
+    let listed = if facts.is_empty() {
+        "(none yet)".to_string()
+    } else {
+        facts.iter().enumerate().map(|(i, f)| format!("{}. {}", i + 1, f.fact)).collect::<Vec<_>>().join("\n")
+    };
+    format!("Current facts:\n{listed}\n\nUser said:\n{}\n\nAssistant answered:\n{}", clip(said, 4000), clip(reply, 3000))
+}
+
+/// Which remembered facts to drop and add, from the model's answer.
+fn learned(v: &Value, facts: &[db::AgentMemory]) -> (Vec<i64>, Vec<String>) {
+    let forget = v["forget"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_u64())
+        .filter_map(|n| facts.get((n as usize).checked_sub(1)?).map(|f| f.id))
+        .collect();
+    let add = v["add"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).take(5).collect();
+    (forget, add)
+}
+
+/// Picks lasting facts out of one finished exchange, using the agent's own
+/// local model, and saves them to its long-term memory.
+async fn learn(core: &Arc<Core>, agent: &db::Agent, said: &str, reply: &str) -> Result<(), String> {
+    let facts = db::list_memories(&core.db.0.lock().unwrap(), agent.id).map_err(err)?;
+    let v = ollama::complete_json_quick(
+        &agent.model,
+        LEARN_SYSTEM,
+        &learn_prompt(&facts, said, reply),
+        learn_schema(),
+        std::time::Duration::from_secs(180),
+    )
+    .await?;
+    let (forget, add) = learned(&v, &facts);
+    if forget.is_empty() && add.is_empty() {
+        return Ok(());
+    }
+    {
+        let conn = core.db.0.lock().unwrap();
+        for id in forget {
+            db::delete_memory(&conn, id).map_err(err)?;
+        }
+        db::add_memories(&conn, agent.id, &add).map_err(err)?;
+    }
+    core.changed("memories-changed");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -779,12 +906,43 @@ mod tests {
         };
         let max = agent(1, "Max", "grok", "You are a sarcastic researcher.", true);
         let all = [max.clone(), agent(2, "Daily Planner", "claude", "", false)];
-        let s = agent_system(&max, &all);
+        let s = agent_system(&max, &all, &[]);
         assert!(s.starts_with("You are a sarcastic researcher.\n\n"));
         assert!(s.contains("\"Max\"") && s.contains("you remember them") && s.contains("Grok or ChatGPT apps"));
         assert!(s.contains("Daily Planner (") && !s.contains("Max ("));
-        let alone = agent_system(&agent(3, "Solo", "local", "", false), &[]);
+        let alone = agent_system(&agent(3, "Solo", "local", "", false), &[], &[]);
         assert!(alone.starts_with("You are \"Solo\"") && alone.contains("Memory is off") && !alone.contains("other agents"));
+        let local = agent(4, "Local AI", "local", "", true);
+        let s = agent_system(&local, &[], &["Has a dog named Rex.".into()]);
+        assert!(s.contains("long-term memory") && s.ends_with("earlier chats (use it when it helps; don't recite it):\n- Has a dog named Rex."));
+        assert!(!agent_system(&max, &all, &[]).contains("long-term memory"));
+    }
+
+    #[test]
+    fn learned_facts_are_read_safely() {
+        let m = |id: i64, fact: &str| db::AgentMemory { id, agent_id: 1, fact: fact.into(), created_at: String::new() };
+        let facts = [m(7, "Lives in Denver."), m(9, "Drinks coffee.")];
+        let v = json!({ "add": ["Moved to Boston.", "  ", 3], "forget": [1, 0, 5, "2"] });
+        assert_eq!(learned(&v, &facts), (vec![7], vec!["Moved to Boston.".to_string()]));
+        assert_eq!(learned(&json!({}), &facts), (vec![], vec![]));
+        let p = learn_prompt(&facts, "hi", &"x".repeat(5000));
+        assert!(p.contains("1. Lives in Denver.\n2. Drinks coffee.") && p.ends_with("…"));
+        assert!(learn_prompt(&[], "hi", "yo").contains("(none yet)"));
+    }
+
+    #[tokio::test]
+    async fn memory_commands_list_delete_and_clear() {
+        let core = core();
+        let local = call(&core, "save_agent", json!({ "agent": { "name": "Local AI", "model": "", "provider": "local", "system_prompt": "Be brief." } })).await.unwrap();
+        let id = local["id"].as_i64().unwrap();
+        assert_eq!(local["memory"], true);
+        db::add_memories(&core.db.0.lock().unwrap(), id, &["One.".into(), "Two.".into()]).unwrap();
+        let list = call(&core, "list_memories", json!({ "agentId": id })).await.unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        call(&core, "delete_memory", json!({ "id": list[0]["id"] })).await.unwrap();
+        assert_eq!(call(&core, "list_memories", json!({ "agentId": id })).await.unwrap()[0]["fact"], "Two.");
+        call(&core, "clear_memories", json!({ "agentId": id })).await.unwrap();
+        assert_eq!(call(&core, "list_memories", json!({ "agentId": id })).await.unwrap(), json!([]));
     }
 
     #[test]

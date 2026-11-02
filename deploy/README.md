@@ -227,6 +227,16 @@ the first ask after a quiet spell waits while the model loads. The desktop app
 in local mode uses Ollama on that computer (`http://127.0.0.1:11434`) if one is
 running; set `CC_OLLAMA_URL` to point either app elsewhere.
 
+**Memory.** Local AI agents keep the chat (the last 10 exchanges, trimmed to
+about 3.5k tokens) and a long-term list of facts about you that lasts across
+chats. After each answer the same model picks out anything worth keeping, with
+its thinking step off, so it takes a few seconds in the background. See and
+delete the facts under Agents > Local AI. cc-server asks Ollama for an 8k
+context window on every call (`CC_OLLAMA_NUM_CTX` changes it); Compose turns on
+flash attention and an 8-bit KV cache so that fits in about the same GPU memory
+as Ollama's smaller default, beside Whisper on an 8 GB card. Check with
+`nvidia-smi` after the first chat.
+
 ## Voice (Whisper)
 
 The mic button in the Agents widget records in the browser and sends the audio

@@ -18,6 +18,15 @@ pub fn url() -> String {
         .unwrap_or_else(|| "http://127.0.0.1:11434".into())
 }
 
+/// How many tokens the model sees at once (prompt plus answer). Ollama's own
+/// default is small, and anything past it is cut from the front, so a long
+/// chat would silently lose its start. 8k fits qwen3:8b beside Whisper on an
+/// 8 GB card (with the q8 KV cache set in Compose). Every call sends the same
+/// value so Ollama never reloads the model to change it.
+pub fn num_ctx() -> u64 {
+    std::env::var("CC_OLLAMA_NUM_CTX").ok().and_then(|v| v.trim().parse().ok()).filter(|n| *n >= 2048).unwrap_or(8192)
+}
+
 /// The models pulled into Ollama, as (name, label), smallest first.
 pub async fn models() -> Result<Vec<(String, String)>, String> {
     let resp = reqwest::Client::new()
@@ -57,12 +66,25 @@ fn parse_tags(v: &Value) -> Vec<(String, String)> {
 fn chat_body(model: &str, system: &str, history: &History, user: &str) -> Value {
     let mut all = vec![json!({ "role": "system", "content": system })];
     all.extend(messages(history, user));
-    json!({ "model": model, "messages": all, "stream": false })
+    json!({ "model": model, "messages": all, "stream": false, "options": { "num_ctx": num_ctx() } })
+}
+
+/// Drops `<think>…</think>` reasoning that some models leave in the answer, so
+/// it isn't shown or sent back as chat history.
+fn strip_thinking(text: &str) -> String {
+    let mut out = text.to_string();
+    while let Some(start) = out.find("<think>") {
+        match out[start..].find("</think>") {
+            Some(end) => out.replace_range(start..start + end + "</think>".len(), ""),
+            None => out.truncate(start),
+        }
+    }
+    out.trim().to_string()
 }
 
 fn parse_chat(v: &Value) -> Completion {
     Completion {
-        text: v["message"]["content"].as_str().unwrap_or_default().trim().to_string(),
+        text: strip_thinking(v["message"]["content"].as_str().unwrap_or_default()),
         stop_reason: if v["done_reason"] == "length" { "max_tokens".into() } else { "end_turn".into() },
         model: v["model"].as_str().unwrap_or_default().to_string(),
         input_tokens: v["prompt_eval_count"].as_i64().unwrap_or(0),
@@ -100,6 +122,20 @@ pub async fn complete(model: &str, system: &str, history: &History, user: &str) 
 /// A short answer shaped by a JSON schema (Ollama's structured outputs), for
 /// background jobs such as reading voice commands. Gives up after `timeout`.
 pub async fn complete_json(model: &str, system: &str, user: &str, schema: Value, timeout: Duration) -> Result<Value, String> {
+    structured(model, system, user, schema, timeout, false).await
+}
+
+/// Like `complete_json`, but asks the model to skip its thinking step, which
+/// is most of the time a small job takes. Models that can't think are asked
+/// again without the flag.
+pub async fn complete_json_quick(model: &str, system: &str, user: &str, schema: Value, timeout: Duration) -> Result<Value, String> {
+    match structured(model, system, user, schema.clone(), timeout, true).await {
+        Err(e) if e.contains("think") => structured(model, system, user, schema, timeout, false).await,
+        r => r,
+    }
+}
+
+async fn structured(model: &str, system: &str, user: &str, schema: Value, timeout: Duration, no_think: bool) -> Result<Value, String> {
     let model = if model.trim().is_empty() {
         models().await?.into_iter().next().map(|m| m.0).ok_or("No local models yet. Pull one into Ollama first.")?
     } else {
@@ -107,7 +143,10 @@ pub async fn complete_json(model: &str, system: &str, user: &str, schema: Value,
     };
     let mut body = chat_body(&model, system, &[], user);
     body["format"] = schema;
-    body["options"] = json!({ "temperature": 0 });
+    body["options"]["temperature"] = json!(0);
+    if no_think {
+        body["think"] = json!(false);
+    }
     let resp = reqwest::Client::new()
         .post(format!("{}/api/chat", url()))
         .timeout(timeout)
@@ -156,5 +195,14 @@ mod tests {
         let body = chat_body("m", "sys", &[], "hi");
         assert_eq!(body["stream"], false);
         assert_eq!(body["messages"][1]["content"], "hi");
+        assert_eq!(body["options"]["num_ctx"], 8192);
+    }
+
+    #[test]
+    fn thinking_is_left_out() {
+        assert_eq!(strip_thinking("<think>hmm\nok</think>\n\nHi there."), "Hi there.");
+        assert_eq!(strip_thinking("A <think>x</think>B<think>y</think> C"), "A B C");
+        assert_eq!(strip_thinking("Cut off <think>never closed"), "Cut off");
+        assert_eq!(strip_thinking("  plain "), "plain");
     }
 }

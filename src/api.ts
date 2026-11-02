@@ -145,6 +145,14 @@ export type Provider = {
   note: string | null;
 };
 
+/** A fact an agent keeps about the user across chats (long-term memory). */
+export type AgentMemory = {
+  id: number;
+  agent_id: number;
+  fact: string;
+  created_at: string;
+};
+
 export type AgentRun = {
   id: number;
   agent_id: number;
@@ -227,6 +235,10 @@ export const api = {
   runAgent: (agentId: number, input: string) => call<AgentRun>("run_agent", { agentId, input }),
   /** Starts a new chat: later messages no longer see the earlier ones. */
   clearChat: (agentId: number) => call<void>("clear_chat", { agentId }),
+  /** What an agent remembers about you across chats (Local AI agents). */
+  listMemories: (agentId: number) => call<AgentMemory[]>("list_memories", { agentId }),
+  deleteMemory: (id: number) => call<void>("delete_memory", { id }),
+  clearMemories: (agentId: number) => call<void>("clear_memories", { agentId }),
   listProviders: () => call<Provider[]>("list_providers"),
   setProviderKey: (provider: ProviderId, key: string) => call<void>("set_provider_key", { provider, key }),
   /** Asks a provider directly, using its first agent (made on first use). */
