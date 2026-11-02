@@ -163,7 +163,7 @@ export type AgentRun = {
   /** The remote agent working on a background run (Cursor). */
   external_id: string | null;
   /** Where the request came from: the app, or a Pocket voice command. */
-  source: "app" | "pocket";
+  source: "app" | "pocket" | "voice";
 };
 
 export type CursorMessage = { from: "you" | "cursor"; text: string };

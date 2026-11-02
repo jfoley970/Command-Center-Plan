@@ -17,6 +17,8 @@ pub mod providers;
 pub mod secrets;
 pub mod transfer;
 pub mod unifi;
+pub mod voice;
+pub mod whisper;
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};

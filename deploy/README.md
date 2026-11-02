@@ -227,7 +227,31 @@ the first ask after a quiet spell waits while the model loads. The desktop app
 in local mode uses Ollama on that computer (`http://127.0.0.1:11434`) if one is
 running; set `CC_OLLAMA_URL` to point either app elsewhere.
 
-Whisper for voice is still to come; it will sit next to Ollama the same way.
+## Voice (Whisper)
+
+The mic button in the Agents widget records in the browser and sends the audio
+to Whisper ([openai-whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice),
+faster-whisper engine), which runs next to Ollama: same `llm` profile, same GPU
+override, not published, reached only by cc-server. Recordings are written
+down on the server and never stored.
+
+1. `docker compose pull whisper && docker compose up -d` (with
+   `COMPOSE_PROFILES=llm`). The first start downloads the `small` model, about
+   500 MB, into the `whisper` volume.
+2. `docker compose logs -f whisper` until it says the server is up, then
+   *Settings > Connections > Voice* turns green.
+3. In the Agents widget, click the mic, speak, click again. "Claude, …" or a
+   trigger word goes where it names, "add a todo …" or "remind me …" does
+   that, and anything else goes to the agent on screen.
+
+`small` in float16 takes about 1 GB of GPU memory, so it fits beside an 8B model
+on an 8 GB card, and Whisper unloads it after 10 quiet minutes
+(`MODEL_IDLE_TIMEOUT`). Change `ASR_MODEL` to `base` for less memory or
+`medium` for better accuracy. On a box without a GPU, use the
+`v1.10.0` image (no `-gpu`) and `ASR_QUANTIZATION: int8`.
+
+Browsers only allow the microphone on HTTPS pages (or localhost), which the
+public and LAN setups both are. The browser asks once for permission.
 
 ## Settings reference (`cc-server`)
 
@@ -240,4 +264,5 @@ Whisper for voice is still to come; it will sit next to Ollama the same way.
 | `CC_WEB_DIR` | `./dist` | The built frontend. |
 | `CC_SECRET_KEY_FILE` | unset | 32-byte key (hex, base64 or raw). systemd `LoadCredential=cc-secret-key` also works. |
 | `CC_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama for the Local AI provider. Compose sets `http://ollama:11434`. |
+| `CC_WHISPER_URL` | `http://127.0.0.1:9000` | Whisper for push-to-talk. Compose sets `http://whisper:9000`. |
 | `TZ` | host | Time zone for reminders and agent context. |

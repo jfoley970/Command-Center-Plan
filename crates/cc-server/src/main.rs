@@ -85,6 +85,8 @@ fn router(core: Arc<Core>, auth: Auth, web_dir: &FsPath) -> Router {
     let api = Router::new()
         .route("/call/{command}", post(call))
         .route("/events", get(events))
+        // Push-to-talk recordings arrive as base64 in the call body.
+        .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(auth, require_auth))
         .route("/health", get(|| async { "ok" }));
     // Webhooks prove who they are with a signature, not a sign-in. A long

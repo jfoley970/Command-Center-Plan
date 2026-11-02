@@ -403,6 +403,24 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             ok(())
         }
 
+        // ---------- Push-to-talk ----------
+        "voice_status" => ok(crate::whisper::status().await),
+        "voice_command" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                audio: String,
+                #[serde(default)]
+                mime: String,
+                #[serde(default)]
+                agent_id: Option<i64>,
+                #[serde(default)]
+                provider: Option<String>,
+            }
+            let A { audio, mime, agent_id, provider } = args(a)?;
+            ok(crate::voice::handle_audio(core, &audio, &mime, crate::voice::Fallback { agent_id, provider }).await?)
+        }
+
         // ---------- Pocket recorder ----------
         "pocket_status" => ok(core.pocket.snapshot(core)?),
         "pocket_refresh" => ok(pocket::refresh(core).await?),

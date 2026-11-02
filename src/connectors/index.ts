@@ -2,6 +2,7 @@
 import "./claude";
 import "./aiProviders";
 import "./ollama";
+import "./voice";
 import "./microsoft365";
 import "./atera";
 import "./unifi";

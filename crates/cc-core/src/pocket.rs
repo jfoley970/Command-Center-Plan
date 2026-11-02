@@ -909,6 +909,34 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
     Ok(())
 }
 
+/// The wake phrase in use.
+pub fn wake(conn: &Connection) -> String {
+    setting(conn, SET_WAKE).unwrap_or_else(|| DEFAULT_WAKE.into())
+}
+
+/// Records a command heard somewhere other than a Pocket recording (the
+/// dashboard's mic) and carries it out now, so it shows with the others.
+pub async fn run_heard(core: &Arc<Core>, source: &str, heard: &str, p: Parsed) -> Result<Command, String> {
+    let p = match p.kind.as_str() {
+        "reminder" if p.due_at.is_none() => Parsed { due_at: Some(business_close_utc()), ..p },
+        "agent" => p,
+        _ => Parsed { title: p.title.chars().take(MAX_COMMAND_CHARS).collect(), ..p },
+    };
+    let id = {
+        let conn = core.db.0.lock().unwrap();
+        let recording_id = format!("{source}-{}", Utc::now().timestamp_millis());
+        conn.execute(
+            "INSERT INTO pocket_commands (recording_id, seq, recorded_at, heard, kind, title, due_at, target, target_name, status, created_at, via)
+             VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?2, 'rules')",
+            params![recording_id, db::now(), heard, p.kind, p.title, p.due_at, p.target, p.target_name],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.last_insert_rowid()
+    };
+    core.changed("pocket-changed");
+    run(core, id, None).await
+}
+
 fn describe(kind: &str, title: &str, target_name: &str) -> String {
     match kind {
         "reminder" => format!("Reminder: {title}"),

@@ -5,8 +5,16 @@ import { useData } from "../data";
 import { MIC } from "../icons";
 import { formatWhen } from "../time";
 import { openUrl } from "../transport";
+import { useRecorder, voice, type VoiceStatus } from "../voice";
 import CursorRun from "./CursorRun";
 import Widget from "./Widget";
+
+const MIC_BIG = (
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="9" y="2" width="6" height="12" rx="3" />
+    <path d="M5 10a7 7 0 0 0 14 0M12 17v5" />
+  </svg>
+);
 
 const STATUS_LABEL = { running: "Running", error: "Error", refused: "Declined", stopped: "Stopped", done: "" } as const;
 
@@ -20,11 +28,20 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
   onOpenAgents: () => void;
   onOpenSettings: () => void;
 }) {
-  const { agents, runs, providers, act } = useData();
+  const { agents, runs, providers, act, setError } = useData();
   const [input, setInput] = useState("");
   const [shown, setShown] = useState<number | null>(null);
   const [picked, setPicked] = useState<ProviderId | null>(null);
   const [repo, setRepo] = useState("");
+  const mic = useRecorder();
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
+  const [thinking, setThinking] = useState(false);
+  /** The last thing the mic heard, and what came of it when it wasn't a question. */
+  const [heard, setHeard] = useState<{ text: string; result: string } | null>(null);
+
+  useEffect(() => {
+    voice.status().then(setVoiceStatus).catch(() => setVoiceStatus(null));
+  }, []);
 
   const current = agents.find((a) => a.id === agentId);
   const providerId: ProviderId = picked ?? current?.provider ?? "claude";
@@ -81,6 +98,37 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
       setPicked(null);
       setAgentId(result.agent_id);
     }
+  }
+
+  // Click to talk, click again to send. The words go where they name, or to
+  // the agent on screen.
+  async function toggleMic() {
+    if (mic.recording) {
+      const got = await mic.stop();
+      if (!got) return;
+      setThinking(true);
+      const fallback = agent ? { agentId: agent.id } : { provider: providerId };
+      const res = await act(() => voice.command(got.audio, got.mime, fallback));
+      setThinking(false);
+      if (!res) return;
+      if (res.run) {
+        setHeard(null);
+        setPicked(null);
+        setAgentId(res.run.agent_id);
+        setShown(res.run.id);
+      } else {
+        setHeard({ text: res.heard, result: res.result });
+      }
+      return;
+    }
+    const status = await voice.status().catch(() => null);
+    setVoiceStatus(status);
+    if (!status?.connected) {
+      setError(`Voice isn't ready: ${status?.note ?? "can't reach the server"} See Settings > Connections > Voice.`);
+      return;
+    }
+    setHeard(null);
+    await act(() => mic.start());
   }
 
   // Cursor needs a repository before it can run, so offer to set one up here.
@@ -150,16 +198,41 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={ready ? `Ask ${name}…` : "Start with claude: or chatgpt: to ask another AI"}
+            placeholder={
+              mic.recording ? `Listening… ${mic.seconds}s. Click the mic again to send.`
+              : thinking ? "Writing down what you said…"
+              : ready ? `Ask ${name}…` : "Start with claude: or chatgpt: to ask another AI"
+            }
             title="Start with a name to pick who answers: claude:, chatgpt:, grok:, @cursor, or an agent's name"
             aria-label="Message for your agents"
           />
+          <button
+            type="button"
+            className={mic.recording ? "mic recording" : "mic"}
+            onClick={toggleMic}
+            disabled={thinking}
+            aria-pressed={mic.recording}
+            aria-label={mic.recording ? "Stop and send" : "Talk"}
+            title={
+              mic.recording ? "Stop and send"
+              : voiceStatus?.connected ? "Talk: say “Claude, …”, a trigger word, or just ask the agent on screen"
+              : `Voice isn't ready: ${voiceStatus?.note ?? "checking…"}`
+            }
+          >
+            {MIC_BIG}
+          </button>
           <button className="primary" type="submit" disabled={!input.trim() && !(ready && agent)}>
             {input.trim() ? "Send" : "Run"}
           </button>
         </form>
 
         <div className="console-output" aria-live="polite">
+          {heard && (
+            <div className="heard muted small">
+              <span className="via-pocket">{MIC} Voice</span> “{heard.text}” · {heard.result}
+            </div>
+          )}
+          {thinking && <div className="thinking" aria-label="Working"><span /><span /><span /></div>}
           {provider?.unavailable ? (
             <p className="empty">{provider.unavailable}</p>
           ) : provider && !provider.connected ? (
@@ -188,7 +261,7 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
             <>
               <div className="row between muted small">
                 <span>
-                  {run.source === "pocket" && <><span className="via-pocket" title="Said to Pocket">{MIC} Voice</span>{" · "}</>}
+                  {run.source !== "app" && <><span className="via-pocket" title={run.source === "pocket" ? "Said to Pocket" : "Said to the mic"}>{MIC} Voice</span>{" · "}</>}
                   {run.agent_name} · {formatWhen(run.started_at)}
                   {run.input !== "(no extra input)" && ` · “${run.input}”`}
                 </span>
