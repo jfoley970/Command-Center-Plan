@@ -207,6 +207,7 @@ export const api = {
   setTodoDone: (id: number, done: boolean) => call<void>("set_todo_done", { id, done }),
   setTodoPriority: (id: number, priority: number) => call<void>("set_todo_priority", { id, priority }),
   setTodoNotes: (id: number, notes: string) => call<void>("set_todo_notes", { id, notes }),
+  setTodoDue: (id: number, due_at: string | null) => call<void>("set_todo_due", { id, due_at }),
   todoEmail: (id: number) => call<TodoEmail | null>("todo_email", { id }),
   deleteTodo: (id: number) => call<void>("delete_todo", { id }),
 
