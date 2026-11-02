@@ -462,6 +462,26 @@ static UNDER: LazyLock<Regex> = LazyLock::new(|| {
 });
 static ADD_TO_LIST: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^add\s+(.+?)\s+to\s+(?:my\s+|the\s+)?(?:to[\s\-]?do\s+|task\s+)?list$").unwrap());
+/// A question or request about what's in the app ("what's due today?", "any
+/// UniFi alerts?", "can you snooze the Dana reminder?"). These go to Local AI,
+/// which can look things up and change them, instead of becoming a todo.
+static APP_ASK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:(?:hey|ok|okay|so|and|please)[\s,]+)?(?:what|which|who|when|where|why|how|is|are|am|was|were|can|could|would|will|should|any|anything|do\s+(?:i|we|you)|does|did|have\s+(?:i|we|you)|has|show|list|read|give|tell|check|find|look|delete|remove|reschedule|move|rename|change|start|stop|pause|resume)\b").unwrap()
+});
+static APP_NOUN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:to[\s\-]?dos?|tasks?|remind(?:er|ers)?|projects?|pomodoros?|focus\s+timer|timer|alerts?|atera|unifi|sites?|inbox|e-?mails?|mail|outlook|flagged|pocket|recordings?|agenda|due|overdue|(?:my|the)\s+list)\b").unwrap()
+});
+/// Verbs that only make sense about something already in the app, so they
+/// need no noun: "mark the domain renewal done".
+static ITEM_VERB: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:(?:please|can\s+you|could\s+you)\s+)?(?:mark|snooze|reopen|un[\s\-]?check|check\s+off|cross\s+off|tick\s+off)\b").unwrap()
+});
+
+/// Whether a command is a question or request about the app's own data.
+pub fn about_app(text: &str) -> bool {
+    ITEM_VERB.is_match(text) || (APP_ASK.is_match(text) && APP_NOUN.is_match(text)) || (text.ends_with('?') && APP_NOUN.is_match(text))
+}
+
 static ASK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?:ask|tell|have)\s+").unwrap());
 static IN_TIME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bin\s+(half\s+an\s+hour|an?|\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[\s\-]five|forty|fifty|ninety)\s*(minutes?|mins?|hours?|hrs?|days?)?\b").unwrap()
@@ -722,7 +742,25 @@ pub fn parse_with(command: &str, agents: &[(i64, String)], triggers: &[Trigger],
             return Parsed { kind: "agent".into(), title: capitalize(&rest), due_at: None, target, target_name, sure: true };
         }
     }
+    // Only Local AI has the app's tools, so questions and changes about todos,
+    // reminders, alerts and the like go to it, whoever is on screen.
+    if about_app(&text) {
+        return local_ai(&text);
+    }
     todo(&text, false)
+}
+
+/// A request for Local AI, which works with the app's own data.
+fn local_ai(text: &str) -> Parsed {
+    let name = providers::find("local").map_or("Local AI", |p| p.name);
+    Parsed {
+        kind: "agent".into(),
+        title: capitalize(text),
+        due_at: None,
+        target: "provider:local".into(),
+        target_name: name.into(),
+        sure: true,
+    }
 }
 
 // ---------- The local model, for commands the rules can't place ----------
@@ -750,7 +788,9 @@ fn ai_prompt(agents: &[(i64, String)], now: DateTime<Local>) -> String {
          - kind \"reminder\": he wants to be alerted at a time. remind_at is that local time as YYYY-MM-DDTHH:MM.\n\
          - kind \"project\": he wants a new project made in his project list. title is the project's name only. \
          If he says it goes under another project, parent is that project's name.\n\
-         - kind \"agent\": he is asking one of these AI agents to do something: {}. agent is that name.\n\
+         - kind \"agent\": he is asking one of these AI agents to do something: {}. agent is that name. \
+         A question about his todos, reminders, projects, alerts, sites, mail or recordings, or a request to change, \
+         finish, move, snooze or delete one that already exists, goes to agent \"Local AI\", with title his request as he said it.\n\
          - kind \"todo\": anything else he needs to do. If he says when it is due, remind_at is that local time.\n\
          title is a short task in his words, without the time or the agent's name, starting with a capital letter. \
          Leave remind_at, agent and parent empty when they don't apply.\n\
@@ -1459,6 +1499,44 @@ mod tests {
         // Leading with a name wins over words that look like a reminder.
         let p = parse("Claude, remind me how DNS works", &agents, now);
         assert_eq!((p.kind.as_str(), p.target.as_str(), p.title.as_str()), ("agent", "provider:claude", "Remind me how DNS works"));
+    }
+
+    #[test]
+    fn questions_about_the_app_go_to_local_ai() {
+        let now = at(10, 0);
+        let local = |t: &str| {
+            let p = parse(t, &[], now);
+            p.kind == "agent" && p.target == "provider:local" && p.target_name == "Local AI" && p.sure
+        };
+        for t in [
+            "What's due today?",
+            "Any UniFi alerts",
+            "What todos do I have",
+            "Mark the domain renewal done",
+            "Can you snooze the Dana reminder until 4?",
+            "Check my inbox",
+            "Start a pomodoro",
+            "Delete the todo about the old printer",
+            "Is anything overdue",
+            "Did Pocket hear anything this morning?",
+        ] {
+            assert!(local(t), "{t}");
+        }
+        // Things to do, plain questions and the usual commands stay as they were.
+        for t in [
+            "Call Bob about the invoice",
+            "What's the tallest mountain in Colorado?",
+            "add a todo to check the backups",
+            "remind me at 3 PM to call Dana",
+            "start a new project called Website Redesign",
+            "Finish the project proposal",
+        ] {
+            assert!(!local(t), "{t}");
+        }
+        // The agent's name still wins.
+        assert_eq!(parse("Claude, what's due today?", &[], now).target, "provider:claude");
+        // Local AI gets the request as said.
+        assert_eq!(parse("what's due today", &[], now).title, "What's due today");
     }
 
     #[test]
