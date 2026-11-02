@@ -796,6 +796,8 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         db::list_runs(&conn, Some(agent_id), 1).map_err(err)?.remove(0)
     };
     core.changed("runs-changed");
+    // Actions Local AI may take without a tap (asking Grok) run now its reply is in.
+    let run = if provider.id == "local" { run_auto_approved(core, run).await? } else { run };
     if learns(&agent) && run.status == "done" && !input.trim().is_empty() && !unreliable {
         let (core, agent, said, reply) = (core.clone(), agent.clone(), input.trim().to_string(), run.output.clone());
         tokio::spawn(async move {
@@ -805,6 +807,34 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         });
     }
     Ok(run)
+}
+
+/// Carries out the requests from one Local AI run that need no tap, and
+/// returns the run with their outcome added.
+async fn run_auto_approved(core: &Arc<Core>, run: db::AgentRun) -> CmdResult<db::AgentRun> {
+    let auto: Vec<i64> = db::list_tool_approvals(&core.db.0.lock().unwrap())
+        .map_err(err)?
+        .into_iter()
+        .filter(|a| a.run_id == Some(run.id) && a.status == "pending" && auto_approved(a))
+        .map(|a| a.id)
+        .collect();
+    if auto.is_empty() {
+        return Ok(run);
+    }
+    for id in auto {
+        if let Err(e) = Box::pin(approve_tool(core, id)).await {
+            eprintln!("auto-approved request {id}: {e}");
+        }
+    }
+    let conn = core.db.0.lock().unwrap();
+    Ok(db::get_run(&conn, run.id).map_err(err)?.unwrap_or(run))
+}
+
+/// Whether a stored request may run without a tap. Checked again here, not
+/// just trusted from the stored flag, so only the AIs allowed today qualify.
+fn auto_approved(a: &db::ToolApproval) -> bool {
+    let args: Value = serde_json::from_str(&a.args).unwrap_or_default();
+    a.tool == "ask_ai" && args["auto"].as_bool() == Some(true) && args["ai"].as_str().is_some_and(crate::tools::runs_without_asking)
 }
 
 /// Runs an action Local AI asked for, after the user approved it. Only the
@@ -1267,6 +1297,25 @@ mod tests {
         }
         let (text, _) = crate::tools::run(&core, ctx, "send_email", &json!({ "to": "a@b.com", "subject": "Hi", "body": "x" })).await;
         assert!(text.contains("No inbox"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn grok_is_asked_without_a_tap_but_chatgpt_waits() {
+        let core = core();
+        core.secrets.set(crate::secrets::XAI_KEY, "test").unwrap();
+        core.secrets.set(crate::secrets::OPENAI_KEY, "test").unwrap();
+        let ctx = crate::tools::Ctx::default();
+        let (text, used) = crate::tools::run(&core, ctx, "ask_ai", &json!({ "ai": "grok", "question": "What's new?" })).await;
+        assert!(text.starts_with("Done: Ask Grok") && used.ok && !used.waiting, "{text}");
+        let (text, used) = crate::tools::run(&core, ctx, "ask_ai", &json!({ "ai": "chatgpt", "question": "What's new?" })).await;
+        assert!(text.contains("approval") && used.waiting, "{text}");
+        let list = db::list_tool_approvals(&core.db.0.lock().unwrap()).unwrap();
+        let auto: Vec<bool> = list.iter().map(auto_approved).collect();
+        assert_eq!(auto, vec![false, true], "newest first: ChatGPT waits, Grok runs");
+        // A stored flag alone isn't enough; only Grok qualifies.
+        let mut forged = list[0].clone();
+        forged.args = json!({ "ai": "chatgpt", "question": "x", "auto": true }).to_string();
+        assert!(!auto_approved(&forged));
     }
 
     /// A stand-in model that answers from a script, one reply per call.

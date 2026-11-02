@@ -23,7 +23,8 @@ export function Approvals() {
     return () => uns.forEach((u) => void u.then((f) => f()));
   }, []);
 
-  const pendingTools = tools.filter((a) => a.status === "pending");
+  // Asking Grok runs without a tap, so it never waits here.
+  const pendingTools = tools.filter((a) => a.status === "pending" && !a.args.includes('"auto":true'));
   const pendingMail = mail.filter((a) => a.status === "pending" && a.requested_by === "Local AI");
   if (pendingTools.length === 0 && pendingMail.length === 0) return null;
 
