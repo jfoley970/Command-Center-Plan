@@ -9,6 +9,7 @@ import { useRecorder, voice, type VoiceStatus } from "../voice";
 import CursorRun from "./CursorRun";
 import Widget from "./Widget";
 import { ToolsUsed } from "./ToolsUsed";
+import { Approvals } from "./Approvals";
 
 const MIC_BIG = (
   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -175,6 +176,7 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
       }
     >
       <div className="console">
+        <Approvals />
         <div className="ai-strip" role="tablist" aria-label="AI providers">
           {providers.map((p) => {
             const state = p.unavailable || !p.connected ? "idle" : working(p.id) ? "warning" : "ok";

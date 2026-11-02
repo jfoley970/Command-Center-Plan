@@ -5,6 +5,7 @@ import { useData } from "../data";
 import { formatWhen } from "../time";
 import { listen, openUrl } from "../transport";
 import { ToolsUsed } from "../widgets/ToolsUsed";
+import { Approvals } from "../widgets/Approvals";
 
 type Draft = Pick<Agent, "name" | "description" | "system_prompt" | "model" | "provider" | "repo" | "include_context" | "memory"> & { id?: number };
 
@@ -221,6 +222,7 @@ function AgentChat({ agent, onEdit, onDelete }: { agent: Agent; onEdit: () => vo
         </div>
       </div>
 
+      {agent.provider === "local" && <Approvals />}
       {agent.memory && agent.provider === "local" && <MemoryPanel agent={agent} />}
 
       <div className="chat-thread" aria-live="polite">

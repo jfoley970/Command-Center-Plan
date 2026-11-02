@@ -176,7 +176,21 @@ export type AgentRun = {
   tools?: ToolUsed[];
 };
 
-export type ToolUsed = { tool: string; label: string; ok: boolean };
+export type ToolUsed = { tool: string; label: string; ok: boolean; waiting?: boolean };
+
+/** Something Local AI asked to do that waits for the user's Approve. */
+export type ToolApproval = {
+  id: number;
+  run_id: number | null;
+  agent_id: number | null;
+  tool: string;
+  args: string;
+  summary: string;
+  status: "pending" | "approved" | "rejected" | "done" | "failed";
+  result: string;
+  created_at: string;
+  decided_at: string | null;
+};
 
 export type CursorMessage = { from: "you" | "cursor"; text: string };
 
@@ -228,6 +242,9 @@ export const api = {
   listMailActions: () => call<MailAction[]>("list_mail_actions"),
   approveMailAction: (id: number) => call<MailAction>("approve_mail_action", { id }),
   rejectMailAction: (id: number) => call<void>("reject_mail_action", { id }),
+  listToolApprovals: () => call<ToolApproval[]>("list_tool_approvals"),
+  approveTool: (id: number) => call<ToolApproval>("approve_tool", { id }),
+  rejectTool: (id: number) => call<ToolApproval>("reject_tool", { id }),
 
   listModels: () => call<ModelOption[]>("list_models"),
   listAgents: () => call<Agent[]>("list_agents"),

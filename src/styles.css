@@ -337,6 +337,12 @@ button.danger { color: var(--p1); }
 .tools-used { list-style: none; margin: 0.35rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.3rem; font-family: var(--font-data); font-size: 0.72rem; }
 .tools-used li { color: var(--text-2); border: 1px solid var(--border); background: var(--panel-2); padding: 1px 6px; border-radius: var(--radius); }
 .tools-used li::before { content: "› "; color: var(--accent); }
+.tools-used li.waiting { color: var(--warning); border-color: var(--warning); }
+.approvals { border: 1px solid var(--warning); background: rgba(255, 227, 107, 0.06); padding: 0.5rem 0.6rem; display: flex; flex-direction: column; gap: 0.4rem; }
+.approvals h3 { margin: 0; font-size: 0.8rem; color: var(--warning); letter-spacing: 0.04em; text-transform: uppercase; }
+.approvals ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.approvals li { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.approvals li .grow { flex: 1; min-width: 12rem; }
 .tools-used li.failed { color: var(--critical); border-color: var(--critical); background: var(--critical-bg); }
 .via-pocket { display: inline-flex; align-items: center; gap: 3px; color: var(--warning); }
 .chat-reply { display: flex; gap: 0.5rem; align-items: flex-end; }

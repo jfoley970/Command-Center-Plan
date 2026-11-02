@@ -129,6 +129,20 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     finished_at   TEXT
 );
 
+-- Actions Local AI asked for that wait for the user's Approve (tools.rs, Tier::Ask).
+CREATE TABLE IF NOT EXISTS tool_approvals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER REFERENCES agent_runs(id) ON DELETE SET NULL,
+    agent_id    INTEGER,
+    tool        TEXT NOT NULL,
+    args        TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected | done | failed
+    result      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    decided_at  TEXT
+);
+
 -- What an agent remembers about the user across chats (long-term memory).
 -- Short facts, picked out of finished exchanges; the user can delete any.
 CREATE TABLE IF NOT EXISTS agent_memories (
@@ -1056,6 +1070,94 @@ pub fn finish_mail_action(conn: &Connection, id: i64, error: Option<&str>) -> ru
         params![id, if error.is_some() { "failed" } else { "done" }, error],
     )?;
     Ok(())
+}
+
+// ---------- Tool approvals ----------
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ToolApproval {
+    pub id: i64,
+    pub run_id: Option<i64>,
+    pub agent_id: Option<i64>,
+    pub tool: String,
+    /// The tool call's arguments, as JSON.
+    pub args: String,
+    /// What the user reads when asked to approve.
+    pub summary: String,
+    pub status: String,
+    /// What running it returned, or why it failed.
+    pub result: String,
+    pub created_at: String,
+    pub decided_at: Option<String>,
+}
+
+const APPROVAL_COLS: &str = "id, run_id, agent_id, tool, args, summary, status, result, created_at, decided_at";
+
+fn approval_row(r: &Row) -> rusqlite::Result<ToolApproval> {
+    Ok(ToolApproval {
+        id: r.get(0)?,
+        run_id: r.get(1)?,
+        agent_id: r.get(2)?,
+        tool: r.get(3)?,
+        args: r.get(4)?,
+        summary: r.get(5)?,
+        status: r.get(6)?,
+        result: r.get(7)?,
+        created_at: r.get(8)?,
+        decided_at: r.get(9)?,
+    })
+}
+
+pub fn add_tool_approval(conn: &Connection, run_id: Option<i64>, agent_id: Option<i64>, tool: &str, args: &str, summary: &str) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO tool_approvals (run_id, agent_id, tool, args, summary, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![run_id, agent_id, tool, args, summary, now()],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Pending ones first, then the most recent decisions.
+pub fn list_tool_approvals(conn: &Connection) -> rusqlite::Result<Vec<ToolApproval>> {
+    let mut stmt = conn.prepare(&format!("SELECT {APPROVAL_COLS} FROM tool_approvals ORDER BY status = 'pending' DESC, id DESC LIMIT 50"))?;
+    let rows = stmt.query_map([], approval_row)?;
+    rows.collect()
+}
+
+/// Moves a pending approval to `status`. Returns it only if it was still
+/// pending, so an action runs at most once.
+pub fn decide_tool_approval(conn: &Connection, id: i64, status: &str) -> rusqlite::Result<Option<ToolApproval>> {
+    let changed = conn.execute(
+        "UPDATE tool_approvals SET status = ?2, decided_at = ?3 WHERE id = ?1 AND status = 'pending'",
+        params![id, status, now()],
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    conn.query_row(&format!("SELECT {APPROVAL_COLS} FROM tool_approvals WHERE id = ?1"), [id], approval_row).optional()
+}
+
+pub fn finish_tool_approval(conn: &Connection, id: i64, ok: bool, result: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tool_approvals SET status = ?2, result = ?3 WHERE id = ?1",
+        params![id, if ok { "done" } else { "failed" }, result],
+    )?;
+    Ok(())
+}
+
+/// Adds a line to the end of a finished run's answer, so the chat (and the
+/// model, next message) sees how an approval turned out.
+pub fn append_run_output(conn: &Connection, run_id: i64, text: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE agent_runs SET output = output || ?1 WHERE id = ?2", params![text, run_id])?;
+    Ok(())
+}
+
+/// One stored email's mailbox id, for replying to or deleting it:
+/// (account id, Graph message id, subject, sender address).
+pub fn email_ref(conn: &Connection, id: i64) -> rusqlite::Result<Option<(i64, String, String, String)>> {
+    conn.query_row("SELECT account_id, remote_id, subject, from_addr FROM emails WHERE id = ?1", [id], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })
+    .optional()
 }
 
 /// What the user may change on a suggestion before accepting it.
