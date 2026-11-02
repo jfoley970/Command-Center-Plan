@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { MIC } from "../icons";
 import { api, type Agent, type AgentRun, type ProviderId } from "../api";
 import { useData } from "../data";
 import { formatWhen } from "../time";
@@ -143,12 +144,6 @@ export default function Agents({ selectedId, onSelect }: { selectedId: number | 
   );
 }
 
-const MIC = (
-  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <rect x="9" y="2" width="6" height="12" rx="3" />
-    <path d="M5 10a7 7 0 0 0 14 0M12 17v5" />
-  </svg>
-);
 
 /** One agent's conversation: every run is a message and its reply, oldest first, with a reply box. */
 function AgentChat({ agent, onEdit, onDelete }: { agent: Agent; onEdit: () => void; onDelete: () => void }) {

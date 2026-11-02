@@ -24,6 +24,15 @@ export type PocketCommand = {
   link: string;
 };
 
+/** A word that, opening a recording, sends the rest somewhere you chose. */
+export type PocketTrigger = {
+  word: string;
+  /** "provider:claude", "agent:3", or "todo" | "reminder" | "project". */
+  target: string;
+  /** Filled in by the server when saved. */
+  target_name?: string;
+};
+
 export type PocketSnapshot = {
   has_key: boolean;
   has_webhook_secret: boolean;
@@ -37,6 +46,7 @@ export type PocketSnapshot = {
   checked_at: string | null;
   error: string | null;
   commands: PocketCommand[];
+  triggers: PocketTrigger[];
 };
 
 export type PocketEdit = { kind?: PocketKind; title?: string; due_at?: string | null };
@@ -47,12 +57,13 @@ export const pocket = {
   setKey: (key: string) => call<PocketSnapshot>("pocket_set_key", { key }),
   setWebhookSecret: (key: string) => call<PocketSnapshot>("pocket_set_webhook_secret", { key }),
   setOptions: (o: { wake: string; auto: PocketAuto; ai: boolean; aiModel: string }) => call<PocketSnapshot>("pocket_set_options", o),
+  setTriggers: (triggers: PocketTrigger[]) => call<PocketSnapshot>("pocket_set_triggers", { triggers }),
   run: (id: number, edit?: PocketEdit) => call<PocketCommand>("pocket_run", { id, edit }),
   dismiss: (id: number) => call<void>("pocket_dismiss", { id }),
 };
 
 export const AUTO_LABEL: Record<PocketAuto, string> = {
-  tasks: "Todos and reminders run at once; agent requests wait for a tap",
-  all: "Everything runs at once, agent requests included",
+  tasks: "Todos, reminders and questions to AIs run at once; Cursor jobs wait for a tap",
+  all: "Everything runs at once, Cursor jobs included",
   none: "Everything waits for a tap",
 };

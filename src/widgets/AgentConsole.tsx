@@ -1,7 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, type ProviderId } from "../api";
 import { routeCommand } from "../agentRoute";
 import { useData } from "../data";
+import { MIC } from "../icons";
 import { formatWhen } from "../time";
 import { openUrl } from "../transport";
 import CursorRun from "./CursorRun";
@@ -32,6 +33,25 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
   const agent = current?.provider === providerId ? current : providerAgents[0];
   const agentRuns = agent ? runs.filter((r) => r.agent_id === agent.id) : [];
   const run = agentRuns.find((r) => r.id === shown) ?? agentRuns[0];
+
+  // A voice request (Pocket) brings its agent up here, so the answer shows
+  // without picking it. Runs that were already there when the widget opened
+  // don't count.
+  const newestVoice = runs.find((r) => r.source === "pocket");
+  const seenVoice = useRef<number | null | undefined>(undefined);
+  useEffect(() => {
+    const id = newestVoice?.id ?? null;
+    if (seenVoice.current === undefined) {
+      seenVoice.current = id;
+      return;
+    }
+    if (id !== null && id !== seenVoice.current && newestVoice) {
+      seenVoice.current = id;
+      setPicked(null);
+      setShown(id);
+      setAgentId(newestVoice.agent_id);
+    }
+  }, [newestVoice?.id]);
 
   const working = (id: ProviderId) => runs.some((r) => r.provider === id && r.status === "running");
 
@@ -168,6 +188,7 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
             <>
               <div className="row between muted small">
                 <span>
+                  {run.source === "pocket" && <><span className="via-pocket" title="Said to Pocket">{MIC} Voice</span>{" · "}</>}
                   {run.agent_name} · {formatWhen(run.started_at)}
                   {run.input !== "(no extra input)" && ` · “${run.input}”`}
                 </span>
