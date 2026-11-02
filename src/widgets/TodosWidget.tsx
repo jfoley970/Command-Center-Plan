@@ -2,15 +2,16 @@ import { useState, type CSSProperties, type FormEvent, type ReactElement } from 
 import { api, type Project, type Todo } from "../api";
 import { useData } from "../data";
 import { buildProjectTree, type ProjectNode } from "../projectTree";
-import { formatWhen, isDueNow, isOverdue } from "../time";
+import { isDueSoon, isOverdue } from "../time";
 import TodoDetail from "./TodoDetail";
+import TodoDue from "./TodoDue";
 import Widget from "./Widget";
 
 export type TodoFilter = "open" | "today" | "overdue" | "done";
 
 const TABS: { id: TodoFilter; label: string }[] = [
   { id: "open", label: "Open" },
-  { id: "today", label: "Today" },
+  { id: "today", label: "Next 3 days" },
   { id: "overdue", label: "Overdue" },
   { id: "done", label: "Done" },
 ];
@@ -61,7 +62,7 @@ export function applyFilter(todos: Todo[], f: TodoFilter): Todo[] {
     case "open":
       return todos.filter((t) => !t.done);
     case "today":
-      return todos.filter((t) => !t.done && isDueNow(t.due_at));
+      return todos.filter((t) => !t.done && isDueSoon(t.due_at));
     case "overdue":
       return todos.filter((t) => !t.done && isOverdue(t.due_at));
     case "done":
@@ -193,12 +194,7 @@ export default function TodosWidget({ filter, setFilter }: { filter: TodoFilter;
         )}
         <span className="grow truncate" title={t.title}>{t.title}</span>
         {!open && t.notes && !email && <span className="notes-mark" title={t.notes}>notes</span>}
-        {t.due_at && !t.done && (
-          <span className={isOverdue(t.due_at) ? "tag critical" : "tag"}>
-            {isOverdue(t.due_at) && "! "}
-            {formatWhen(t.due_at)}
-          </span>
-        )}
+        {!t.done && <TodoDue todo={t} />}
         <button className="ghost row-action" onClick={() => act(() => api.deleteTodo(t.id))} aria-label={`Delete ${t.title}`}>
           ✕
         </button>

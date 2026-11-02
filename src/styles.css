@@ -612,3 +612,5 @@ body {
 .tl-item { border-color: var(--bg); }
 .tl-item.reminder.past { background: color-mix(in srgb, var(--accent) 40%, var(--bg)); }
 .tl-item.todo.past { background: color-mix(in srgb, var(--series-2) 40%, var(--bg)); }
+.tag-btn.critical:hover:not(:disabled) { background: var(--critical-bg); border-color: rgba(255, 90, 79, 0.7); }
+.due-add { font-size: 0.75rem; white-space: nowrap; }
