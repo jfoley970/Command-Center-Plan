@@ -344,11 +344,11 @@ pub const TOOLS: &[Tool] = &[
         name: "ask_ai",
         group: "agents",
         tier: Tier::Ask,
-        description: "Ask one of the user's cloud AIs (Grok, ChatGPT or Claude) a question; its answer shows in its own chat. Grok is asked at once; ChatGPT and Claude cost more, so they wait for the user's approval.",
+        description: "Pass a question or request to another AI: grok, chatgpt or claude, or one of the user's agents by name (such as Daily Planner). Its answer shows in its own chat. Grok and Grok agents run at once; the others cost more, so they wait for the user's approval.",
         params: || {
             (
                 json!({
-                    "ai": { "type": "string", "enum": ["grok", "chatgpt", "claude"] },
+                    "ai": { "type": "string", "description": "grok, chatgpt, claude, or an agent's name" },
                     "question": { "type": "string" }
                 }),
                 &["ai", "question"],
@@ -409,6 +409,12 @@ pub fn pick(input: &str, recent: &str) -> Vec<&'static Tool> {
         groups.push("projects");
     }
     TOOLS.iter().filter(|t| groups.contains(&t.group)).collect()
+}
+
+/// The tools for pulling action items out of a recording: todos and
+/// reminders only, whatever the recording's words mention.
+pub fn pick_action_items() -> Vec<&'static Tool> {
+    TOOLS.iter().filter(|t| ["list_todos", "add_todo", "list_reminders", "add_reminder"].contains(&t.name)).collect()
 }
 
 /// The tools in Ollama's format.
@@ -682,15 +688,21 @@ async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<(Stri
         "send_email" | "reply_email" | "delete_email" => return ask_mail(core, tool.name, a).await.map(|s| (s, false)),
         "ask_ai" => {
             let ai = s(a, "ai").unwrap_or_default().to_lowercase();
-            let p = crate::providers::find(&ai).filter(|p| matches!(p.id, "grok" | "chatgpt" | "claude")).ok_or("ai must be grok, chatgpt or claude.")?;
+            let q = s(a, "question").ok_or("What should it be asked?")?;
+            if let Some(agent) = named_agent(core, &ai)? {
+                let auto = runs_without_asking(&agent.provider);
+                let args = json!({ "agent_id": agent.id, "question": q, "auto": auto });
+                (args, format!("Ask {}: “{}”", agent.name, one_line(&q, 120)))
+            } else {
+            let p = crate::providers::find(&ai).filter(|p| matches!(p.id, "grok" | "chatgpt" | "claude")).ok_or("ai must be grok, chatgpt, claude or one of the user's agents by name.")?;
             if let Some(key) = p.key {
                 if core.secrets.get(key)?.is_none() {
                     return Err(format!("{} has no key yet, so it can't be asked. The user adds it in Settings > Connections.", p.name));
                 }
             }
-            let q = s(a, "question").ok_or("What should it be asked?")?;
             let auto = runs_without_asking(p.id);
             (json!({ "ai": p.id, "question": q, "auto": auto }), format!("Ask {}: “{}”", p.name, one_line(&q, 120)))
+            }
         }
         "atera_resolve_alert" => {
             let id = int(a, "alert_id").ok_or("Which alert? Pass its #id from atera_alerts.")?;
@@ -749,6 +761,32 @@ async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<(Stri
         core.notify("Approve a Local AI action", &summary);
     }
     Ok((summary, auto))
+}
+
+/// One of the user's own agents, by name, that Local AI may pass a request
+/// to: a chat agent, not Local AI itself (no loops) and not Cursor (that's
+/// cursor_task). None when the name is a provider such as "grok" instead.
+pub fn named_agent(core: &Core, name: &str) -> Result<Option<db::Agent>, String> {
+    let want: String = name.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    if want.is_empty() {
+        return Ok(None);
+    }
+    let agents = db::list_agents(&core.db.0.lock().unwrap()).map_err(|e| e.to_string())?;
+    let norm = |n: &str| n.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let found = agents.into_iter().find(|g| norm(&g.name) == want);
+    match found {
+        Some(g) if g.provider == "local" => Err(format!("{} is you; answer it yourself.", g.name)),
+        Some(g) if g.provider == "cursor" => Err(format!("{} is a Cursor agent; use cursor_task.", g.name)),
+        Some(g) => {
+            if let Some(key) = crate::providers::find(&g.provider).and_then(|p| p.key) {
+                if core.secrets.get(key)?.is_none() {
+                    return Err(format!("{} has no key yet, so it can't be asked. The user adds it in Settings > Connections.", g.name));
+                }
+            }
+            Ok(Some(g))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Cloud AIs Local AI may ask without a tap. Grok only (James, 2026-11-02);
@@ -1224,6 +1262,9 @@ mod tests {
         let names = |tools: Vec<&Tool>| tools.iter().map(|t| t.name).collect::<Vec<_>>();
         let n = names(pick("what's critical in Atera?", ""));
         assert!(n.contains(&"atera_alerts") && n.contains(&"overview") && !n.contains(&"unifi_sites"));
+        let mut items = names(pick_action_items());
+        items.sort();
+        assert_eq!(items, ["add_reminder", "add_todo", "list_reminders", "list_todos"]);
         let n = names(pick("hello there", ""));
         assert!(n.contains(&"list_todos") && n.contains(&"add_reminder") && !n.contains(&"atera_alerts"));
         let n = names(pick("and the second one?", "Atera alerts: 3 critical"));

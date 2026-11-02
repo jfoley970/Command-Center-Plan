@@ -1,7 +1,8 @@
 //! Push-to-talk from the dashboard: the browser records, Whisper on the
 //! server writes it down, and the words are handled like a Pocket command.
 //! "Claude, ..." or a trigger word goes where it names; "add a todo ..." or
-//! "remind me ..." does that; anything else goes to the agent on screen.
+//! "remind me ..." does that; anything else goes to the agent the wake phrase
+//! names ("Cortana, ..."), or else the agent on screen.
 
 use std::sync::Arc;
 
@@ -40,7 +41,16 @@ pub async fn handle_audio(core: &Arc<Core>, audio_b64: &str, mime: &str, fallbac
     if audio.len() > MAX_AUDIO_BYTES {
         return Err("That recording is too long. Keep it to a few minutes.".into());
     }
-    let text = whisper::transcribe(audio, mime).await?;
+    // Names Whisper should expect: the wake phrase and the agents'.
+    let hint = {
+        let conn = core.db.0.lock().unwrap();
+        let mut names = vec![pocket::wake(&conn)];
+        names.extend(db::list_agents(&conn).map_err(|e| e.to_string())?.into_iter().map(|a| a.name));
+        names.extend(["Grok", "Claude", "ChatGPT", "Cursor"].map(String::from));
+        names.dedup();
+        format!("{}.", names.join(", "))
+    };
+    let text = whisper::transcribe(audio, mime, &hint).await?;
     if text.trim().is_empty() {
         return Err("I didn't catch anything. Try again a little closer to the mic.".into());
     }
@@ -53,9 +63,12 @@ pub async fn handle_text(core: &Arc<Core>, text: &str, fallback: Fallback) -> Re
         let agents: Vec<(i64, String)> = db::list_agents(&conn).map_err(|e| e.to_string())?.into_iter().map(|a| (a.id, a.name)).collect();
         (pocket::wake(&conn), agents, pocket::triggers(&conn))
     };
-    // Saying the wake phrase first is fine, just not needed.
-    let said = pocket::extract(text, &wake).into_iter().next().unwrap_or_else(|| text.trim().to_string());
-    let p = pocket::parse_with(&said, &agents, &triggers, chrono::Local::now());
+    // Saying the wake phrase first is fine, just not needed. When it names an
+    // agent ("Cortana, ..."), she takes what the rules can't place.
+    let after_wake = pocket::extract(text, &wake).into_iter().next();
+    let named = if after_wake.is_some() { pocket::wake_agent(&wake, &agents) } else { None };
+    let said = after_wake.unwrap_or_else(|| text.trim().to_string());
+    let p = pocket::to_wake_agent(pocket::parse_with(&said, &agents, &triggers, chrono::Local::now()), &said, named.as_ref());
     let heard = text.trim().to_string();
 
     let run = match p.kind.as_str() {
