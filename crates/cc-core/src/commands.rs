@@ -66,6 +66,8 @@ struct MailSetup {
 pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value> {
     match command {
         // Commands that can run agents (directly, or through Pocket and voice).
+        // Approving is only ever called from the app's own UI, so approving is the user's decision.
+        "approve_tool" => ok(approve_tool(core, args::<Id>(a)?.id).await?),
         "run_agent" => {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -319,6 +321,16 @@ pub(crate) async fn call_data(core: &Arc<Core>, command: &str, a: Value) -> CmdR
         // Sends and deletes queued by mail::change_mail. These are only ever called
         // from the app's own UI, so approving one is the user's decision.
         "list_mail_actions" => ok(db::list_mail_actions(&conn()).map_err(err)?),
+        "list_tool_approvals" => ok(db::list_tool_approvals(&conn()).map_err(err)?),
+        "reject_tool" => {
+            let ap = db::decide_tool_approval(&conn(), args::<Id>(a)?.id, "rejected").map_err(err)?.ok_or("That request was already approved or rejected.")?;
+            if let Some(run) = ap.run_id {
+                db::append_run_output(&conn(), run, &format!("\n\n✗ You rejected: {}.", ap.summary)).map_err(err)?;
+            }
+            core.changed("approvals-changed");
+            core.changed("runs-changed");
+            ok(ap)
+        }
         "approve_mail_action" => ok(mail::run_approved(core, args::<Id>(a)?.id).await?),
         "reject_mail_action" => {
             let id = args::<Id>(a)?.id;
@@ -752,7 +764,8 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
             let recent = history.iter().rev().take(2).map(|(q, a)| format!("{q} {a}")).collect::<Vec<_>>().join(" ");
             let picked = crate::tools::pick(input.trim(), &recent);
             let system = format!("{system}\n\n{}", crate::tools::system_note(chrono::Local::now()));
-            match local_with_tools(core, &agent.model, &system, &history, &user, &picked).await {
+            let ctx = crate::tools::Ctx { run_id: Some(run_id), agent_id: Some(agent_id) };
+            match local_with_tools(core, ctx, &agent.model, &system, &history, &user, &picked).await {
                 Ok((c, used)) => {
                     db::set_run_tools(&core.db.0.lock().unwrap(), run_id, &used).map_err(err)?;
                     Ok(c)
@@ -788,6 +801,63 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
     Ok(run)
 }
 
+/// Runs an action Local AI asked for, after the user approved it. Only the
+/// "approve_tool" command (the app's own Approve button) calls this.
+pub(crate) async fn approve_tool(core: &Arc<Core>, id: i64) -> CmdResult<db::ToolApproval> {
+    {
+        let conn = core.db.0.lock().unwrap();
+        let pending = db::list_tool_approvals(&conn).map_err(err)?.into_iter().find(|a| a.id == id);
+        let run = pending.and_then(|a| a.run_id).and_then(|r| db::get_run(&conn, r).ok().flatten());
+        if run.is_some_and(|r| r.status == "running") {
+            return Err("Local AI is still answering. Approve it once the answer is in.".into());
+        }
+    }
+    let ap = db::decide_tool_approval(&core.db.0.lock().unwrap(), id, "approved").map_err(err)?.ok_or("That request was already approved or rejected.")?;
+    core.changed("approvals-changed");
+    let a: Value = serde_json::from_str(&ap.args).map_err(|e| format!("The stored request is not valid JSON: {e}"))?;
+    let clip = |t: &str| if t.chars().count() <= 600 { t.to_string() } else { format!("{}…", t.chars().take(600).collect::<String>()) };
+    let result: CmdResult<String> = match ap.tool.as_str() {
+        "delete_todo" | "delete_reminder" | "delete_project" => {
+            call_data(core, &ap.tool, serde_json::json!({ "id": a["id"] })).await.map(|_| "Deleted.".to_string())
+        }
+        "ask_ai" => {
+            let ai = a["ai"].as_str().unwrap_or_default().to_string();
+            let q = a["question"].as_str().unwrap_or_default().to_string();
+            match Box::pin(ask_provider(core, &ai, q, "app")).await {
+                Ok(r) if r.status == "done" => Ok(format!("{} answered: {}", r.agent_name, clip(&r.output))),
+                Ok(r) => Err(clip(&r.output)),
+                Err(e) => Err(e),
+            }
+        }
+        "cursor_task" => {
+            let agent_id = a["agent_id"].as_i64().ok_or("The stored request has no agent.")?;
+            let what = a["instructions"].as_str().unwrap_or_default().to_string();
+            match Box::pin(run_agent(core, agent_id, what, "app")).await {
+                Ok(r) if r.status == "error" => Err(clip(&r.output)),
+                Ok(r) => Ok(format!("Cursor started{}.", if r.link.is_empty() { String::new() } else { format!(": {}", r.link) })),
+                Err(e) => Err(e),
+            }
+        }
+        other => Err(format!("{other} can't be approved here.")),
+    };
+    let (ok_, text) = match &result {
+        Ok(t) => (true, t.clone()),
+        Err(e) => (false, e.clone()),
+    };
+    {
+        let conn = core.db.0.lock().unwrap();
+        db::finish_tool_approval(&conn, id, ok_, &text).map_err(err)?;
+        if let Some(run) = ap.run_id {
+            let line = if ok_ { format!("\n\n✓ Approved: {}. {text}", ap.summary) } else { format!("\n\n✗ Approved but failed: {}. {text}", ap.summary) };
+            db::append_run_output(&conn, run, &line).map_err(err)?;
+        }
+    }
+    core.changed("approvals-changed");
+    core.changed("runs-changed");
+    let conn = core.db.0.lock().unwrap();
+    Ok(db::list_tool_approvals(&conn).map_err(err)?.into_iter().find(|x| x.id == id).unwrap_or(ap))
+}
+
 /// Local AI uses tools unless `CC_LOCAL_TOOLS=0` turns them off.
 fn tools_on() -> bool {
     std::env::var("CC_LOCAL_TOOLS").ok().is_none_or(|v| v.trim() != "0")
@@ -803,6 +873,7 @@ const TOOL_CALLS_PER_ROUND: usize = 6;
 /// tools it used, in order.
 async fn local_with_tools(
     core: &Arc<Core>,
+    ctx: crate::tools::Ctx,
     model: &str,
     system: &str,
     history: &claude::History,
@@ -814,12 +885,13 @@ async fn local_with_tools(
         let model = model.clone();
         async move { ollama::chat_step(&model, &messages, &tools).await }
     };
-    tool_loop(core, system, history, user, picked, step).await
+    tool_loop(core, ctx, system, history, user, picked, step).await
 }
 
 /// The back-and-forth behind `local_with_tools`; `step` asks the model once.
 async fn tool_loop<F, Fut>(
     core: &Arc<Core>,
+    ctx: crate::tools::Ctx,
     system: &str,
     history: &claude::History,
     user: &str,
@@ -859,7 +931,7 @@ where
                 // Only tools offered for this message run, even if the model knows other names.
                 (format!("Error: {name} isn't available for this message."), None)
             } else {
-                let (r, u) = crate::tools::run(core, &name, &args).await;
+                let (r, u) = crate::tools::run(core, ctx, &name, &args).await;
                 (r, Some(u))
             };
             used.extend(u);
@@ -1071,7 +1143,7 @@ mod tests {
             };
             async move { Ok(out) }
         };
-        let (answer, used) = tool_loop(&core, "sys", &[], "add a todo to call Dell", &picked, step).await.unwrap();
+        let (answer, used) = tool_loop(&core, Default::default(), "sys", &[], "add a todo to call Dell", &picked, step).await.unwrap();
         assert_eq!((answer.text.as_str(), answer.input_tokens), ("Added it.", 20));
         assert_eq!(used.len(), 1);
         assert_eq!(used[0].label, "Added todo “Call Dell”");
@@ -1082,6 +1154,51 @@ mod tests {
         assert!(tool_msgs[0]["content"].as_str().unwrap().contains("isn't available"));
         assert!(tool_msgs[1]["content"].as_str().unwrap().starts_with("Added todo #"));
         assert!(seen[0].1 > 0);
+    }
+
+    #[tokio::test]
+    async fn ask_first_tools_wait_for_approval() {
+        let core = core();
+        let todo = call(&core, "add_todo", json!({ "todo": { "title": "Old task" } })).await.unwrap();
+        let id = todo["id"].as_i64().unwrap();
+        let (agent, run) = {
+            let c = core.db.0.lock().unwrap();
+            let agent = db::save_agent(&c, serde_json::from_value(json!({ "name": "Local AI", "model": "", "provider": "local", "system_prompt": "x" })).unwrap()).unwrap();
+            let run = db::start_run(&c, agent.id, "delete old task", "app").unwrap();
+            db::finish_run(&c, run, "done", "It's waiting for you.", "", 0, 0).unwrap();
+            (agent, run)
+        };
+        let ctx = crate::tools::Ctx { run_id: Some(run), agent_id: Some(agent.id) };
+        let (text, used) = crate::tools::run(&core, ctx, "delete_todo", &json!({ "id": id })).await;
+        assert!(text.contains("NOT happened") && used.waiting, "{text}");
+        // Nothing deleted until approved.
+        assert_eq!(call(&core, "list_todos", Value::Null).await.unwrap().as_array().unwrap().len(), 1);
+        let pending = call(&core, "list_tool_approvals", Value::Null).await.unwrap();
+        assert_eq!((pending[0]["status"].as_str(), pending[0]["summary"].as_str()), (Some("pending"), Some("Delete todo “Old task”")));
+        let done = call(&core, "approve_tool", json!({ "id": pending[0]["id"] })).await.unwrap();
+        assert_eq!(done["status"], "done");
+        assert_eq!(call(&core, "list_todos", Value::Null).await.unwrap(), json!([]));
+        assert!(call(&core, "approve_tool", json!({ "id": pending[0]["id"] })).await.is_err(), "runs once");
+        let out = db::get_run(&core.db.0.lock().unwrap(), run).unwrap().unwrap().output;
+        assert!(out.ends_with("✓ Approved: Delete todo “Old task”. Deleted."), "{out}");
+
+        // Rejected requests never run.
+        let r = call(&core, "add_reminder", json!({ "reminder": { "title": "Ping", "remind_at": "2030-01-01T09:00:00Z" } })).await.unwrap();
+        crate::tools::run(&core, ctx, "delete_reminder", &json!({ "id": r["id"] })).await;
+        let ap = call(&core, "list_tool_approvals", Value::Null).await.unwrap()[0]["id"].clone();
+        call(&core, "reject_tool", json!({ "id": ap })).await.unwrap();
+        assert!(call(&core, "approve_tool", json!({ "id": ap })).await.is_err());
+        assert_eq!(call(&core, "list_reminders", Value::Null).await.unwrap().as_array().unwrap().len(), 1);
+
+        // Bad ids and AIs without keys are refused up front.
+        let (text, used) = crate::tools::run(&core, ctx, "delete_todo", &json!({ "id": 999 })).await;
+        assert!(text.contains("no todo #999") && !used.ok);
+        if std::env::var("XAI_API_KEY").is_err() {
+            let (text, _) = crate::tools::run(&core, ctx, "ask_ai", &json!({ "ai": "grok", "question": "hi" })).await;
+            assert!(text.contains("no key"), "{text}");
+        }
+        let (text, _) = crate::tools::run(&core, ctx, "send_email", &json!({ "to": "a@b.com", "subject": "Hi", "body": "x" })).await;
+        assert!(text.contains("No inbox"), "{text}");
     }
 
     #[tokio::test]
@@ -1100,7 +1217,7 @@ mod tests {
             let c = claude::Completion { text: msg["content"].as_str().unwrap().into(), ..c };
             async move { Ok((msg, c)) }
         };
-        let (answer, used) = tool_loop(&core, "sys", &[], "todos", &picked, step).await.unwrap();
+        let (answer, used) = tool_loop(&core, Default::default(), "sys", &[], "todos", &picked, step).await.unwrap();
         assert_eq!(answer.text, "Here you go.");
         assert_eq!(used.len(), TOOL_ROUNDS);
         let r = rounds.lock().unwrap();
@@ -1115,7 +1232,7 @@ mod tests {
         let agent = db::save_agent(&c, serde_json::from_value(json!({ "name": "Local AI", "model": "", "provider": "local", "system_prompt": "Be brief." })).unwrap()).unwrap();
         let run = db::start_run(&c, agent.id, "hi", "app").unwrap();
         assert!(db::get_run(&c, run).unwrap().unwrap().tools.is_empty());
-        let used = vec![crate::tools::Used { tool: "add_todo".into(), label: "Added todo “X”".into(), ok: true }];
+        let used = vec![crate::tools::Used { tool: "add_todo".into(), label: "Added todo “X”".into(), ok: true, waiting: false }];
         db::set_run_tools(&c, run, &used).unwrap();
         assert_eq!(db::get_run(&c, run).unwrap().unwrap().tools, used);
     }

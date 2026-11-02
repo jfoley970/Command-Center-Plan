@@ -6,7 +6,7 @@ export function ToolsUsed({ tools }: { tools?: ToolUsed[] }) {
   return (
     <ul className="tools-used" aria-label="Tools used">
       {tools.map((t, i) => (
-        <li key={i} className={t.ok ? "" : "failed"} title={t.tool}>
+        <li key={i} className={!t.ok ? "failed" : t.waiting ? "waiting" : ""} title={t.tool}>
           {t.label}
         </li>
       ))}
