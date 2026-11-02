@@ -765,7 +765,14 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         "grok" => openai::grok(&api_key, &agent.model, &system, &history, &user).await,
         "local" if tools_on() => {
             let recent = history.iter().rev().take(2).map(|(q, a)| format!("{q} {a}")).collect::<Vec<_>>().join(" ");
-            let picked = crate::tools::pick(input.trim(), &recent);
+            // Naming one of the user's agents ("have Daily Planner ...") offers the agent tools.
+            let names_agent = {
+                let said = input.to_lowercase();
+                db::list_agents(&core.db.0.lock().unwrap()).map_err(err)?.iter().any(|g| g.provider != "local" && !g.name.trim().is_empty() && said.contains(&g.name.trim().to_lowercase()))
+            };
+            let recent = if names_agent { format!("{recent} agent") } else { recent };
+            let action_items = input.contains(crate::pocket::ACTION_ITEMS_MARK);
+            let picked = if action_items { crate::tools::pick_action_items() } else { crate::tools::pick(input.trim(), &recent) };
             let system = format!("{system}\n\n{}", crate::tools::system_note(chrono::Local::now()));
             let ctx = crate::tools::Ctx { run_id: Some(run_id), agent_id: Some(agent_id) };
             let asked = Asked { ctx, input: input.trim(), about_data: crate::tools::about_data(input.trim(), "") };
@@ -773,7 +780,8 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
                 Ok((c, used)) => {
                     db::set_run_tools(&core.db.0.lock().unwrap(), run_id, &used).map_err(err)?;
                     // Don't learn from an answer that went wrong; it may say things that aren't so.
-                    unreliable = used.iter().any(|u| !u.ok) || c.text.ends_with(NOTHING_CHANGED);
+                    // A recording holds other people's words; nothing in it is learned as a fact about the user.
+                    unreliable = used.iter().any(|u| !u.ok) || c.text.ends_with(NOTHING_CHANGED) || action_items;
                     Ok(c)
                 }
                 Err(e) => Err(e),
@@ -815,7 +823,7 @@ async fn run_auto_approved(core: &Arc<Core>, run: db::AgentRun) -> CmdResult<db:
     let auto: Vec<i64> = db::list_tool_approvals(&core.db.0.lock().unwrap())
         .map_err(err)?
         .into_iter()
-        .filter(|a| a.run_id == Some(run.id) && a.status == "pending" && auto_approved(a))
+        .filter(|a| a.run_id == Some(run.id) && a.status == "pending" && auto_approved(core, a))
         .map(|a| a.id)
         .collect();
     if auto.is_empty() {
@@ -832,9 +840,14 @@ async fn run_auto_approved(core: &Arc<Core>, run: db::AgentRun) -> CmdResult<db:
 
 /// Whether a stored request may run without a tap. Checked again here, not
 /// just trusted from the stored flag, so only the AIs allowed today qualify.
-fn auto_approved(a: &db::ToolApproval) -> bool {
+fn auto_approved(core: &Core, a: &db::ToolApproval) -> bool {
     let args: Value = serde_json::from_str(&a.args).unwrap_or_default();
-    a.tool == "ask_ai" && args["auto"].as_bool() == Some(true) && args["ai"].as_str().is_some_and(crate::tools::runs_without_asking)
+    // An agent counts by its provider as it is now, not as stored.
+    let provider = match args["agent_id"].as_i64() {
+        Some(id) => db::get_agent(&core.db.0.lock().unwrap(), id).ok().flatten().map(|g| g.provider),
+        None => args["ai"].as_str().map(str::to_string),
+    };
+    a.tool == "ask_ai" && args["auto"].as_bool() == Some(true) && provider.is_some_and(|p| crate::tools::runs_without_asking(&p))
 }
 
 /// Runs an action Local AI asked for, after the user approved it. Only the
@@ -859,7 +872,11 @@ pub(crate) async fn approve_tool(core: &Arc<Core>, id: i64) -> CmdResult<db::Too
         "ask_ai" => {
             let ai = a["ai"].as_str().unwrap_or_default().to_string();
             let q = a["question"].as_str().unwrap_or_default().to_string();
-            match Box::pin(ask_provider(core, &ai, q, "app")).await {
+            let ran = match a["agent_id"].as_i64() {
+                Some(id) => Box::pin(run_agent(core, id, q, "app")).await,
+                None => Box::pin(ask_provider(core, &ai, q, "app")).await,
+            };
+            match ran {
                 Ok(r) if r.status == "done" => Ok(format!("{} answered: {}", r.agent_name, clip(&r.output))),
                 Ok(r) => Err(clip(&r.output)),
                 Err(e) => Err(e),
@@ -1324,12 +1341,12 @@ mod tests {
         let (text, used) = crate::tools::run(&core, ctx, "ask_ai", &json!({ "ai": "chatgpt", "question": "What's new?" })).await;
         assert!(text.contains("approval") && used.waiting, "{text}");
         let list = db::list_tool_approvals(&core.db.0.lock().unwrap()).unwrap();
-        let auto: Vec<bool> = list.iter().map(auto_approved).collect();
+        let auto: Vec<bool> = list.iter().map(|a| auto_approved(&core, a)).collect();
         assert_eq!(auto, vec![false, true], "newest first: ChatGPT waits, Grok runs");
         // A stored flag alone isn't enough; only Grok qualifies.
         let mut forged = list[0].clone();
         forged.args = json!({ "ai": "chatgpt", "question": "x", "auto": true }).to_string();
-        assert!(!auto_approved(&forged));
+        assert!(!auto_approved(&core, &forged));
     }
 
     #[tokio::test]
@@ -1367,6 +1384,31 @@ mod tests {
         assert!(text.contains("isn't a list of email addresses"), "{text}");
         // Nothing has gone to Atera; the alert is still there.
         assert!(crate::atera::find_alert(&core, 42).is_some());
+    }
+
+    #[tokio::test]
+    async fn local_ai_can_pass_requests_to_named_agents() {
+        let core = core();
+        core.secrets.set(crate::secrets::XAI_KEY, "test").unwrap();
+        let mk = |name: &str, provider: &str| {
+            let mut a = providers::quick_agent(providers::find(provider).unwrap());
+            a.name = name.into();
+            db::save_agent(&core.db.0.lock().unwrap(), a).unwrap().id
+        };
+        let bot = mk("Ops Bot", "grok");
+        mk("Daily Planner", "claude");
+        mk("Cortana", "local");
+        let ctx = crate::tools::Ctx::default();
+        let (text, used) = crate::tools::run(&core, ctx, "ask_ai", &json!({ "ai": "ops bot", "question": "Status?" })).await;
+        assert!(text.starts_with("Done: Ask Ops Bot") && !used.waiting, "{text}");
+        let list = db::list_tool_approvals(&core.db.0.lock().unwrap()).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&list[0].args).unwrap()["agent_id"], bot);
+        assert!(auto_approved(&core, &list[0]));
+        // A Claude agent without a key can't be asked; nor can she ask herself.
+        let (text, _) = crate::tools::run(&core, ctx, "ask_ai", &json!({ "ai": "Daily Planner", "question": "Plan my day" })).await;
+        assert!(text.contains("no key"), "{text}");
+        let (text, _) = crate::tools::run(&core, ctx, "ask_ai", &json!({ "ai": "Cortana", "question": "hi" })).await;
+        assert!(text.contains("is you"), "{text}");
     }
 
     /// A stand-in model that answers from a script, one reply per call.

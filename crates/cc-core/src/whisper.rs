@@ -35,7 +35,10 @@ pub async fn status() -> Status {
 
 /// The words in a recording. `mime` is what the browser recorded (webm/opus
 /// in Chrome and Edge, mp4 in Safari); Whisper converts it with ffmpeg.
-pub async fn transcribe(audio: Vec<u8>, mime: &str) -> Result<String, String> {
+///
+/// `hint` lists names to expect ("Cortana, Grok, Daily Planner."), so Whisper
+/// spells them right instead of hearing "Katana".
+pub async fn transcribe(audio: Vec<u8>, mime: &str, hint: &str) -> Result<String, String> {
     let ext = if mime.contains("mp4") || mime.contains("m4a") {
         "m4a"
     } else if mime.contains("ogg") {
@@ -52,7 +55,7 @@ pub async fn transcribe(audio: Vec<u8>, mime: &str) -> Result<String, String> {
     let form = reqwest::multipart::Form::new().part("audio_file", part);
     let resp = reqwest::Client::new()
         .post(format!("{}/asr", url()))
-        .query(&[("output", "json"), ("encode", "true"), ("task", "transcribe"), ("language", "en"), ("vad_filter", "true")])
+        .query(&[("output", "json"), ("encode", "true"), ("task", "transcribe"), ("language", "en"), ("vad_filter", "true"), ("initial_prompt", hint)])
         .multipart(form)
         // The first request after a restart waits for the model to load.
         .timeout(Duration::from_secs(120))

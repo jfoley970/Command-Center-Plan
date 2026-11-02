@@ -15,7 +15,11 @@
 //! model in Ollama reads it instead, so the words never leave the server.
 //! Without Ollama the rules' best guess stands.
 //!
-//! Only recordings that start with the wake phrase are acted on, and only the
+//! When the wake phrase is an agent's name ("Cortana"), she takes whatever the
+//! rules can't place, and saying her name in the middle or at the end of a
+//! recording hands her the whole recording to file its todos and reminders.
+//!
+//! Otherwise only recordings that start with the wake phrase are acted on, and only the
 //! command words are stored. Transcripts of every other recording are read,
 //! found to hold no command, and dropped; their ids are kept for 30 days so the
 //! same recording isn't read twice.
@@ -342,6 +346,85 @@ fn words(text: &str) -> Vec<(usize, String)> {
 /// Every command in a transcript. The recording must open with the wake phrase
 /// (a word or two such as "OK" or "hey" before it is fine); each later "Command
 /// Center" starts another command.
+/// How transcription tends to mishear a name, for the names people give
+/// their assistant. Each entry is the name, then what it may come out as.
+const SOUND_ALIKES: &[(&str, &[&str])] = &[
+    ("cortana", &["kortana", "cortanna", "katana", "cortina", "quartana", "cotana", "cortona", "kotana", "katanna", "courtana"]),
+    ("jarvis", &["jarvas", "jervis", "javis", "jarves"]),
+];
+
+/// Whether a heard word is the wanted one: the same, a known mishearing of
+/// it, or (for longer names) one letter off.
+fn sounds_like(heard: &str, want: &str) -> bool {
+    heard == want
+        || SOUND_ALIKES.iter().any(|(name, alikes)| *name == want && alikes.contains(&heard))
+        || (want.chars().count() >= 6 && one_edit(heard, want))
+}
+
+/// One letter added, dropped or changed.
+fn one_edit(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let (short, long) = if a.len() <= b.len() { (&a, &b) } else { (&b, &a) };
+    if long.len() - short.len() > 1 {
+        return false;
+    }
+    let lead = short.iter().zip(long.iter()).take_while(|(x, y)| x == y).count();
+    if short.len() == long.len() {
+        lead == short.len() || short[lead + 1..] == long[lead + 1..]
+    } else {
+        short[lead..] == long[lead + 1..]
+    }
+}
+
+/// The agent the wake phrase names, if any: with the wake phrase "Cortana"
+/// and an agent called Cortana, she takes whatever the rules can't place.
+pub fn wake_agent(wake: &str, agents: &[(i64, String)]) -> Option<(i64, String)> {
+    let w = norm(wake);
+    agents.iter().find(|(_, name)| !w.is_empty() && norm(name) == w).cloned()
+}
+
+/// Sends a command the rules only guessed at, and app questions meant for
+/// Local AI, to the agent the wake phrase names. Clear commands stay as they are.
+/// The agent gets the words as said, so "remind me ... after lunch" keeps its "remind me".
+pub fn to_wake_agent(p: Parsed, heard: &str, agent: Option<&(i64, String)>) -> Parsed {
+    let Some((id, name)) = agent else { return p };
+    if !p.sure || p.target == "provider:local" {
+        let title = capitalize(&tidy(heard));
+        return Parsed { kind: "agent".into(), title, due_at: None, target: format!("agent:{id}"), target_name: name.clone(), sure: true };
+    }
+    p
+}
+
+/// Whether the wake phrase is said anywhere in the recording, not just at the start.
+pub fn mentions(transcript: &str, wake: &str) -> bool {
+    let wake: Vec<String> = words(wake).into_iter().map(|(_, w)| w).collect();
+    let ws = words(transcript);
+    !wake.is_empty() && ws.windows(wake.len()).any(|win| win.iter().zip(&wake).all(|((_, w), want)| sounds_like(w, want)))
+}
+
+/// Longest recording handed over whole for action items, about 2k tokens, so
+/// it fits Local AI's 8k context with the tools and their results.
+const MAX_RECORDING_CHARS: usize = 8000;
+/// Marks an action-items request. Other people's words are in the recording,
+/// so such a run is offered only the todo and reminder tools, and nothing is
+/// learned from it.
+pub const ACTION_ITEMS_MARK: &str = "Master Chief named you in this recording.";
+
+/// What the wake agent is asked when it's named in the middle or at the end
+/// of a recording: read all of it and file what needs doing (James, 2026-11-02).
+pub fn action_items_request(transcript: &str, name: &str) -> String {
+    let text: String = transcript.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cut = text.chars().count() > MAX_RECORDING_CHARS;
+    let text: String = text.chars().take(MAX_RECORDING_CHARS).collect();
+    format!(
+        "{name}, {ACTION_ITEMS_MARK} Read it and add his todos, reminders and action items: \
+         add_todo for each thing he or his team needs to do, add_reminder for anything tied to a time. \
+         Only add what is clearly a task for him, once each, in a few words; skip small talk and things already done. \
+         Then list what you added.\n\nRecording{}:\n“{text}”",
+        if cut { " (the start of it)" } else { "" }
+    )
+}
+
 pub fn extract(transcript: &str, wake: &str) -> Vec<String> {
     let wake: Vec<String> = words(wake).into_iter().map(|(_, w)| w).collect();
     let ws = words(transcript);
@@ -351,7 +434,7 @@ pub fn extract(transcript: &str, wake: &str) -> Vec<String> {
     // Also accept the phrase run together, such as "commandcenter".
     let joined = wake.concat();
     let match_at = |i: usize| -> Option<usize> {
-        if ws.len() >= i + wake.len() && ws[i..i + wake.len()].iter().map(|(_, w)| w).eq(wake.iter()) {
+        if ws.len() >= i + wake.len() && ws[i..i + wake.len()].iter().zip(wake.iter()).all(|((_, w), want)| sounds_like(w, want)) {
             Some(wake.len())
         } else if wake.len() > 1 && ws.get(i).is_some_and(|(_, w)| *w == joined) {
             Some(1)
@@ -368,7 +451,10 @@ pub fn extract(transcript: &str, wake: &str) -> Vec<String> {
     let mut cmd_start = first + len;
     let mut i = cmd_start;
     while i < ws.len() {
-        if let Some(n) = match_at(i) {
+        // A later wake phrase starts a new command only at the start of a
+        // sentence: "..., uh, Cortana, the Grok integration" is one thought.
+        let new_sentence = i > 0 && transcript[ws[i - 1].0..ws[i].0].contains(['.', '?', '!']);
+        if let Some(n) = match_at(i).filter(|_| new_sentence) {
             bounds.push((cmd_start, i));
             cmd_start = i + n;
             i = cmd_start;
@@ -887,16 +973,37 @@ async fn ingest(core: &Arc<Core>, recording_id: &str, recorded_at: Option<String
         )
     };
     let mut found = extract(transcript, &wake);
+    let from_wake = !found.is_empty();
     if found.is_empty() {
         found.extend(name_led(transcript, &agents, &triggers));
     }
-    if found.is_empty() {
-        return Ok(());
-    }
+    let named = wake_agent(&wake, &agents);
     let now = Local::now();
     let mut read = vec![];
-    for heard in &found {
-        let p = parse_with(heard, &agents, &triggers, now);
+    // Named in the middle or at the end ("... Cortana, get the action items
+    // from that"): the agent reads the whole recording and files what needs doing.
+    if found.is_empty() {
+        let Some((id, name)) = named.as_ref().filter(|_| mentions(transcript, &wake)) else {
+            return Ok(());
+        };
+        found.push(format!("Action items from this recording ({} words)", transcript.split_whitespace().count()));
+        read.push((
+            Parsed {
+                kind: "agent".into(),
+                title: action_items_request(transcript, name),
+                due_at: None,
+                target: format!("agent:{id}"),
+                target_name: name.clone(),
+                sure: true,
+            },
+            "rules",
+        ));
+    }
+    // Commands after a wake phrase that names an agent ("Cortana, ...") go to
+    // that agent when the rules aren't sure, instead of being guessed at.
+    let named = if from_wake { named } else { None };
+    for heard in found.iter().skip(read.len()) {
+        let p = to_wake_agent(parse_with(heard, &agents, &triggers, now), heard, named.as_ref());
         if p.sure || !ai {
             read.push((p, "rules"));
             continue;
@@ -1402,6 +1509,52 @@ mod tests {
         assert!(extract("So we talked about the budget and the command center rollout.", DEFAULT_WAKE).is_empty());
         assert!(extract("Command center.", DEFAULT_WAKE).is_empty());
         assert_eq!(extract("Jarvis, todo buy milk", "Jarvis"), vec!["todo buy milk"]);
+    }
+
+    #[test]
+    fn cortana_is_heard_through_mishearings_and_mid_sentence_mentions_dont_split() {
+        for heard in ["Cortana, add a todo to test", "Kortana add a todo to test", "Katana, add a todo to test", "Cortina: add a todo to test", "Cortanna add a todo to test"] {
+            assert_eq!(extract(heard, "Cortana"), vec!["add a todo to test"], "{heard}");
+        }
+        // Short names need the exact word.
+        assert!(extract("Max, todo test", "Jax").is_empty());
+        // A new sentence starts a new command; a mention mid-thought doesn't.
+        assert_eq!(extract("Cortana, todo order cables. Cortana, remind me at 3 PM to call Dana.", "Cortana"), vec!["todo order cables", "remind me at 3 PM to call Dana"]);
+        assert_eq!(
+            extract("Cortana, have Grok send me a test message. I need to make sure that the, uh, Cortana, the Grok integration is working", "Cortana"),
+            vec!["have Grok send me a test message. I need to make sure that the, uh, Cortana, the Grok integration is working"]
+        );
+        assert!(mentions("We need new cables for the boardroom. Katana, get the action items from that.", "Cortana"));
+        assert!(!mentions("We need new cables for the boardroom.", "Cortana"));
+    }
+
+    #[test]
+    fn the_wake_agent_takes_what_the_rules_cant_place() {
+        let now = at(10, 0);
+        let agents = vec![(1, "Daily Planner".to_string()), (3, "Cortana".to_string())];
+        let named = wake_agent("cortana", &agents);
+        assert_eq!(named, Some((3, "Cortana".to_string())));
+        assert_eq!(wake_agent("Command Center", &agents), None);
+        let route = |t: &str| to_wake_agent(parse(t, &agents, now), t, named.as_ref());
+        // Clear commands still run as they always have.
+        assert_eq!(route("add a todo to renew the domain").kind, "todo");
+        assert_eq!(route("remind me at 3 PM to call Dana").kind, "reminder");
+        assert_eq!(route("Grok, what's new?").target, "provider:grok");
+        // Guesses and app questions go to her, in the words said.
+        let p = route("remind me to call Dana after lunch");
+        assert_eq!((p.kind.as_str(), p.target.as_str(), p.title.as_str()), ("agent", "agent:3", "Remind me to call Dana after lunch"));
+        assert_eq!(route("I need to get the quote over to Mike by Friday").target, "agent:3");
+        assert_eq!(route("what's due today").target_name, "Cortana");
+        // Without a wake agent nothing changes.
+        assert_eq!(to_wake_agent(parse("call Bob", &agents, now), "call Bob", None).kind, "todo");
+    }
+
+    #[test]
+    fn a_mention_later_on_asks_for_action_items_from_the_whole_recording() {
+        let r = action_items_request("We  need to   fish the cable. Cortana, grab the action items.", "Cortana");
+        assert!(r.starts_with("Cortana, Master Chief named you") && r.contains("add_todo") && r.ends_with("“We need to fish the cable. Cortana, grab the action items.”"), "{r}");
+        let long = "word ".repeat(3000);
+        assert!(action_items_request(&long, "Cortana").contains("(the start of it)"));
     }
 
     #[test]
