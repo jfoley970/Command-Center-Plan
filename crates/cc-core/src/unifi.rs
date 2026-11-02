@@ -21,113 +21,233 @@ const POLL_SECS: u64 = 300;
 const WAN_WARN_PCT: f64 = 99.0;
 
 // ---------- API types ----------
-// Everything is optional so a missing or renamed field degrades one number
-// instead of the whole widget.
+// Everything is optional so a missing, null, renamed or oddly typed field
+// degrades one number instead of the whole widget. `#[serde(default)]` alone
+// only covers missing fields: a `null` or a decimal count would still fail the
+// whole reply, so every field goes through one of the lenient readers below.
 
-#[derive(Deserialize)]
-struct Envelope<T> {
-    #[serde(default = "Vec::new")]
-    data: Vec<T>,
-    #[serde(rename = "nextToken")]
+mod lenient {
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    /// Any value, with null (or a value of the wrong shape) read as the default.
+    pub fn or_default<'de, D: Deserializer<'de>, T: Default + for<'a> Deserialize<'a>>(d: D) -> Result<T, D::Error> {
+        let v = Value::deserialize(d)?;
+        Ok(serde_json::from_value(v).unwrap_or_default())
+    }
+
+    /// Text; numbers and booleans are turned into text, anything else is None.
+    pub fn text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        Ok(match Value::deserialize(d)? {
+            Value::String(s) => Some(s),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        })
+    }
+
+    /// Text that is never missing: absent or null become "".
+    pub fn text_or_empty<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        text(d).map(Option::unwrap_or_default)
+    }
+
+    /// A count: decimals are rounded, negatives and non-numbers are None.
+    pub fn count<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+        Ok(number(Value::deserialize(d)?).filter(|n| *n >= 0.0).map(|n| n.round().min(u32::MAX as f64) as u32))
+    }
+
+    pub fn float<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        Ok(number(Value::deserialize(d)?))
+    }
+
+    pub fn flag<'de, D: Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+        Ok(match Value::deserialize(d)? {
+            Value::Bool(b) => Some(b),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+    }
+
+    fn number(v: Value) -> Option<f64> {
+        match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+}
+
+/// One page of any list endpoint. Items stay raw JSON here so a single odd
+/// item can be skipped instead of failing the page.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Envelope {
+    #[serde(deserialize_with = "lenient::or_default")]
+    data: Vec<serde_json::Value>,
+    #[serde(rename = "nextToken", deserialize_with = "lenient::text")]
     next_token: Option<String>,
+}
+
+/// Parses one page body. Returns the items that could be read and how many were skipped.
+fn parse_page<T: for<'de> Deserialize<'de>>(path: &str, body: &str) -> Result<(Vec<T>, Option<String>, usize), String> {
+    let page: Envelope = serde_json::from_str(body).map_err(|e| {
+        let kind = if body.trim_start().starts_with('<') { " (got a web page, not JSON)" } else { "" };
+        format!("Unexpected response from UniFi {path}{kind}: {e}")
+    })?;
+    let mut items = Vec::with_capacity(page.data.len());
+    let mut skipped = 0;
+    for v in page.data {
+        match serde_json::from_value::<T>(v) {
+            Ok(item) => items.push(item),
+            Err(e) => {
+                skipped += 1;
+                eprintln!("unifi: skipped one item from {path}: {e}");
+            }
+        }
+    }
+    Ok((items, page.next_token, skipped))
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RawHost {
+    #[serde(deserialize_with = "lenient::text_or_empty")]
     id: String,
+    #[serde(deserialize_with = "lenient::text")]
     ip_address: Option<String>,
+    #[serde(deserialize_with = "lenient::flag")]
     is_blocked: Option<bool>,
+    #[serde(deserialize_with = "lenient::text")]
     last_connection_state_change: Option<String>,
+    #[serde(deserialize_with = "lenient::or_default")]
     reported_state: Option<RawReportedState>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RawReportedState {
+    #[serde(deserialize_with = "lenient::text")]
     hostname: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     name: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     state: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     version: Option<String>,
+    #[serde(deserialize_with = "lenient::or_default")]
     hardware: Option<RawHardware>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawHardware {
+    #[serde(deserialize_with = "lenient::text")]
     name: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     shortname: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RawSite {
+    #[serde(deserialize_with = "lenient::text_or_empty")]
     site_id: String,
+    #[serde(deserialize_with = "lenient::text_or_empty")]
     host_id: String,
+    #[serde(deserialize_with = "lenient::or_default")]
     meta: RawSiteMeta,
+    #[serde(deserialize_with = "lenient::or_default")]
     statistics: RawStats,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawSiteMeta {
+    #[serde(deserialize_with = "lenient::text")]
     desc: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RawStats {
+    #[serde(deserialize_with = "lenient::or_default")]
     counts: RawCounts,
+    #[serde(deserialize_with = "lenient::or_default")]
     percentages: RawPercentages,
+    #[serde(deserialize_with = "lenient::or_default")]
     isp_info: Option<RawIsp>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RawCounts {
+    #[serde(deserialize_with = "lenient::count")]
     total_device: Option<u32>,
+    #[serde(deserialize_with = "lenient::count")]
     offline_device: Option<u32>,
+    #[serde(deserialize_with = "lenient::count")]
     offline_gateway_device: Option<u32>,
+    #[serde(deserialize_with = "lenient::count")]
     pending_update_device: Option<u32>,
+    #[serde(deserialize_with = "lenient::count")]
     critical_notification: Option<u32>,
+    #[serde(deserialize_with = "lenient::count")]
     wifi_client: Option<u32>,
+    #[serde(deserialize_with = "lenient::count")]
     wired_client: Option<u32>,
+    #[serde(deserialize_with = "lenient::count")]
     guest_client: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RawPercentages {
+    #[serde(deserialize_with = "lenient::float")]
     wan_uptime: Option<f64>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawIsp {
+    #[serde(deserialize_with = "lenient::text")]
     name: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     organization: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RawDeviceGroup {
+    #[serde(deserialize_with = "lenient::text_or_empty")]
     host_id: String,
+    #[serde(deserialize_with = "lenient::or_default")]
     devices: Vec<RawDevice>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct RawDevice {
+    #[serde(deserialize_with = "lenient::text_or_empty")]
     id: String,
+    #[serde(deserialize_with = "lenient::text")]
     mac: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     name: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     model: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     shortname: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     ip: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     status: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     version: Option<String>,
+    #[serde(deserialize_with = "lenient::text")]
     firmware_status: Option<String>,
+    #[serde(deserialize_with = "lenient::flag")]
     is_console: Option<bool>,
 }
 
@@ -201,18 +321,22 @@ async fn get_all<T: for<'de> Deserialize<'de>>(client: &reqwest::Client, key: &s
         }
         let res = req.send().await.map_err(|e| format!("Could not reach UniFi Site Manager: {e}"))?;
         let status = res.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err("UniFi rejected the API key. Create a new one at unifi.ui.com under API.".into());
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err(format!("UniFi accepted the key but refused access to {path}. Make the key with the account that owns the sites."));
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err("UniFi is rate limiting requests. Will retry shortly.".into());
         }
         if !status.is_success() {
-            return Err(format!("UniFi Site Manager returned {status}."));
+            return Err(format!("UniFi Site Manager returned {status} for {path}."));
         }
-        let body: Envelope<T> = res.json().await.map_err(|e| format!("Unexpected response from UniFi: {e}"))?;
-        out.extend(body.data);
-        match body.next_token.filter(|t| !t.is_empty()) {
+        let body = res.text().await.map_err(|e| format!("Could not read the reply from UniFi {path}: {e}"))?;
+        let (items, next, _skipped) = parse_page::<T>(path, &body)?;
+        out.extend(items);
+        match next.filter(|t| !t.is_empty()) {
             Some(t) => token = Some(t),
             None => break,
         }
@@ -225,7 +349,10 @@ async fn fetch_fleet(key: &str) -> Result<Vec<Site>, String> {
     let hosts: Vec<RawHost> = get_all(&client, key, "/hosts").await?;
     let sites: Vec<RawSite> = get_all(&client, key, "/sites").await?;
     // Devices only add detail, so a failure here keeps the site tiles.
-    let devices: Vec<RawDeviceGroup> = get_all(&client, key, "/devices").await.unwrap_or_default();
+    let devices: Vec<RawDeviceGroup> = get_all(&client, key, "/devices").await.unwrap_or_else(|e| {
+        eprintln!("unifi: device list unavailable: {e}");
+        vec![]
+    });
     Ok(build(hosts, sites, devices))
 }
 
@@ -499,6 +626,7 @@ pub async fn refresh(core: &Core) -> Result<Snapshot, String> {
                 fresh
             }
             Err(e) => {
+                eprintln!("unifi: {e}");
                 i.error = Some(e);
                 vec![]
             }
@@ -542,11 +670,11 @@ mod tests {
     ]}]}"#;
 
     fn fleet() -> Vec<Site> {
-        let h: Envelope<RawHost> = serde_json::from_str(HOSTS).unwrap();
-        let s: Envelope<RawSite> = serde_json::from_str(SITES).unwrap();
-        let d: Envelope<RawDeviceGroup> = serde_json::from_str(DEVICES).unwrap();
-        assert!(h.next_token.as_deref() == Some(""));
-        build(h.data, s.data, d.data)
+        let (h, next, _) = parse_page::<RawHost>("/hosts", HOSTS).unwrap();
+        let (s, _, _) = parse_page::<RawSite>("/sites", SITES).unwrap();
+        let (d, _, _) = parse_page::<RawDeviceGroup>("/devices", DEVICES).unwrap();
+        assert!(next.as_deref() == Some(""));
+        build(h, s, d)
     }
 
     #[test]
@@ -591,5 +719,43 @@ mod tests {
 
         let all_seen: HashMap<_, _> = sites.iter().map(|s| (s.id.clone(), problem_keys(s))).collect();
         assert!(new_problems(&Some(all_seen), &refs).is_empty());
+    }
+
+    #[test]
+    fn tolerates_nulls_odd_types_and_bad_items() {
+        // Nulls where the code expects text or objects, decimal and negative
+        // counts, a numeric version, a null data list on devices and one item
+        // that is not an object at all.
+        let hosts = r#"{"data":[
+            {"id":"H1","ipAddress":null,"isBlocked":null,"reportedState":{"name":null,"hostname":"udm","state":"connected","version":4.3,"hardware":null}},
+            {"id":null,"reportedState":null},
+            "not an object"
+        ],"nextToken":null}"#;
+        let sites = r#"{"data":[
+            {"siteId":"S1","hostId":"H1","meta":null,"statistics":{"counts":{"totalDevice":6.0,"offlineDevice":null,"wifiClient":-1,"wiredClient":"3"},"percentages":null,"ispInfo":null}},
+            {"siteId":"S2","hostId":null,"meta":{"desc":null,"name":"Office"},"statistics":null}
+        ]}"#;
+        let devices = r#"{"data":null}"#;
+
+        let (h, next, skipped) = parse_page::<RawHost>("/hosts", hosts).unwrap();
+        assert_eq!((h.len(), skipped, next), (2, 1, None));
+        let (s, _, _) = parse_page::<RawSite>("/sites", sites).unwrap();
+        let (d, _, _) = parse_page::<RawDeviceGroup>("/devices", devices).unwrap();
+        assert!(d.is_empty());
+
+        let fleet = build(h, s, d);
+        assert_eq!(fleet.len(), 2);
+        let home = fleet.iter().find(|s| s.id == "S1").unwrap();
+        assert_eq!(home.name, "udm");
+        assert_eq!(home.console_version, "4.3");
+        assert_eq!(home.devices_total, 6);
+        assert_eq!(home.clients, 3);
+        assert_eq!(home.health, "ok");
+    }
+
+    #[test]
+    fn unreadable_reply_names_the_endpoint() {
+        let Err(err) = parse_page::<RawSite>("/sites", "<html>maintenance</html>") else { panic!("should fail") };
+        assert!(err.contains("/sites") && err.contains("web page"), "{err}");
     }
 }
