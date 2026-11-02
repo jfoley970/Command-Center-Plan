@@ -222,6 +222,31 @@ pub const TOOLS: &[Tool] = &[
         },
     },
     Tool {
+        name: "atera_resolve_alert",
+        group: "atera",
+        tier: Tier::Ask,
+        description: "Mark an Atera alert resolved, by its #id from atera_alerts. Waits for the user's approval.",
+        params: || (json!({ "alert_id": { "type": "integer" } }), &["alert_id"]),
+    },
+    Tool {
+        name: "atera_create_ticket",
+        group: "atera",
+        tier: Tier::Ask,
+        description: "Open a ticket in Atera. Pass alert_id to base it on an alert. Waits for the user's approval.",
+        params: || {
+            (
+                json!({
+                    "title": { "type": "string" },
+                    "description": { "type": "string" },
+                    "priority": { "type": "string", "enum": ["Low", "Medium", "High", "Critical"] },
+                    "alert_id": { "type": "integer", "description": "The alert this ticket is about, if any" },
+                    "end_user_email": { "type": "string", "description": "The customer contact's email, only if the user gave it" }
+                }),
+                &["title"],
+            )
+        },
+    },
+    Tool {
         name: "unifi_sites",
         group: "unifi",
         tier: Tier::Look,
@@ -358,7 +383,7 @@ const GROUP_WORDS: &[(&str, &[&str])] = &[
     ("reminders", &["remind", "alarm", "tomorrow", "tonight", "morning", "afternoon", "evening", "o'clock", "snooze", "schedule", "minutes", "hour"]),
     ("projects", &["project"]),
     ("pomodoro", &["pomodoro", "focus", "timer", "break"]),
-    ("atera", &["atera", "alert", "rmm", "patch", "server", "machine", "computer", "pc", "laptop", "customer", "disk", "cpu", "agent offline"]),
+    ("atera", &["atera", "alert", "ticket", "rmm", "patch", "server", "machine", "computer", "pc", "laptop", "customer", "disk", "cpu", "agent offline"]),
     ("unifi", &["unifi", "network", "wifi", "wi-fi", "site", "access point", "switch", "gateway", "isp", "wan", "internet", "offline", "firmware", "clients"]),
     ("pocket", &["pocket", "recording", "recorded", "recorder", "voice"]),
     ("mail", &["mail", "inbox", "outlook", "flag", "message from", "sender", "reply", "send"]),
@@ -667,6 +692,39 @@ async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<(Stri
             let auto = runs_without_asking(p.id);
             (json!({ "ai": p.id, "question": q, "auto": auto }), format!("Ask {}: “{}”", p.name, one_line(&q, 120)))
         }
+        "atera_resolve_alert" => {
+            let id = int(a, "alert_id").ok_or("Which alert? Pass its #id from atera_alerts.")?;
+            let alert = crate::atera::find_alert(core, id).ok_or_else(|| format!("There's no open Atera alert #{id}. Call atera_alerts for the ids."))?;
+            (json!({ "alert_id": id }), format!("Resolve Atera alert #{id} “{}”{}", one_line(&alert.title, 80), alert_where(&alert)))
+        }
+        "atera_create_ticket" => {
+            let alert = match int(a, "alert_id") {
+                Some(id) => Some(crate::atera::find_alert(core, id).ok_or_else(|| format!("There's no open Atera alert #{id}. Call atera_alerts for the ids."))?),
+                None => None,
+            };
+            let title = s(a, "title").or_else(|| alert.as_ref().map(|x| x.title.clone())).ok_or("What should the ticket be called?")?;
+            let mut description = s(a, "description").unwrap_or_default();
+            if let Some(x) = &alert {
+                let about = format!("From Atera alert #{} on {}{}: {}", x.id, x.device, if x.customer.is_empty() { String::new() } else { format!(" ({})", x.customer) }, x.message);
+                description = if description.is_empty() { about } else { format!("{description}\n\n{about}") };
+            }
+            if description.is_empty() {
+                description = title.clone();
+            }
+            let priority = match s(a, "priority").unwrap_or_default().to_lowercase().as_str() {
+                "low" => "Low",
+                "high" => "High",
+                "critical" => "Critical",
+                _ => "Medium",
+            };
+            let email = s(a, "end_user_email");
+            if let Some(e) = &email {
+                recipients(e)?;
+            }
+            let t = crate::atera::NewTicket { title: title.clone(), description, priority: priority.into(), end_user_email: email };
+            let args = serde_json::to_value(&t).map_err(|e| e.to_string())?;
+            (args, format!("Create Atera ticket “{}” ({priority} priority){}", one_line(&title, 80), alert.as_ref().map(alert_where).unwrap_or_default()))
+        }
         "cursor_task" => {
             let want = s(a, "agent").map(|n| n.to_lowercase());
             let agents = db::list_agents(&core.db.0.lock().unwrap()).map_err(|e| e.to_string())?;
@@ -697,6 +755,16 @@ async fn ask(core: &Arc<Core>, ctx: Ctx, tool: &Tool, a: &Value) -> Result<(Stri
 /// ChatGPT and Claude still ask first.
 pub fn runs_without_asking(ai: &str) -> bool {
     ai == "grok"
+}
+
+/// " on DEVICE (Customer)", for approval summaries.
+fn alert_where(a: &crate::atera::Alert) -> String {
+    match (a.device.is_empty(), a.customer.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!(" on {}", a.device),
+        (true, false) => format!(" for {}", a.customer),
+        (false, false) => format!(" on {} ({})", a.device, a.customer),
+    }
 }
 
 fn recipients(to: &str) -> Result<Vec<Value>, String> {
@@ -982,12 +1050,14 @@ fn atera_text(snap: &crate::atera::Snapshot, severity: &str) -> String {
     for a in alerts.iter().take(20) {
         let customer = &a.customer;
         out.push(format!(
-            "- [{}] {}{}: {}{}",
+            "- #{} [{}] {}{}: {}{}{}",
+            a.id,
             a.severity,
             a.device,
             if customer.is_empty() { String::new() } else { format!(" ({customer})") },
             one_line(&a.title, 90),
-            if a.snoozed_until.is_some() { " (snoozed)" } else { "" }
+            if a.snoozed_until.is_some() { " (snoozed)" } else { "" },
+            a.ticket_id.map(|t| format!(" (ticket #{t})")).unwrap_or_default()
         ));
     }
     out.join("\n")
@@ -1203,7 +1273,7 @@ mod tests {
             for bad in ["key", "secret", "disconnect", "import", "approve", "connect_"] {
                 assert!(!t.name.contains(bad), "{} looks unsafe", t.name);
             }
-            let risky = ["delete", "send", "reply", "ask_ai", "cursor"].iter().any(|w| t.name.contains(w));
+            let risky = ["delete", "send", "reply", "ask_ai", "cursor", "atera_resolve", "atera_create"].iter().any(|w| t.name.contains(w));
             assert_eq!(risky, t.tier == Tier::Ask, "{} has the wrong tier", t.name);
         }
     }

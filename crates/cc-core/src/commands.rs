@@ -865,6 +865,20 @@ pub(crate) async fn approve_tool(core: &Arc<Core>, id: i64) -> CmdResult<db::Too
                 Err(e) => Err(e),
             }
         }
+        "atera_resolve_alert" => {
+            let id = a["alert_id"].as_i64().ok_or("The stored request has no alert.")?;
+            crate::atera::resolve_alert(core, id).await
+        }
+        "atera_create_ticket" => {
+            let field = |k: &str| a[k].as_str().unwrap_or_default().to_string();
+            let t = crate::atera::NewTicket {
+                title: field("TicketTitle"),
+                description: field("Description"),
+                priority: field("TicketPriority"),
+                end_user_email: a["EndUserEmail"].as_str().map(str::to_string),
+            };
+            crate::atera::create_ticket(core, &t).await
+        }
         "cursor_task" => {
             let agent_id = a["agent_id"].as_i64().ok_or("The stored request has no agent.")?;
             let what = a["instructions"].as_str().unwrap_or_default().to_string();
@@ -1316,6 +1330,43 @@ mod tests {
         let mut forged = list[0].clone();
         forged.args = json!({ "ai": "chatgpt", "question": "x", "auto": true }).to_string();
         assert!(!auto_approved(&forged));
+    }
+
+    #[tokio::test]
+    async fn atera_changes_wait_for_approval() {
+        let core = core();
+        crate::atera::set_alerts(
+            &core,
+            vec![crate::atera::Alert {
+                id: 42,
+                title: "Disk C: below 5%".into(),
+                message: "Free space 3.1 GB".into(),
+                severity: "critical".into(),
+                category: "Disk".into(),
+                created: None,
+                snoozed_until: None,
+                ticket_id: None,
+                device: "FS01".into(),
+                customer_id: Some(7),
+                customer: "Acme".into(),
+            }],
+        );
+        let ctx = crate::tools::Ctx::default();
+        let (text, used) = crate::tools::run(&core, ctx, "atera_resolve_alert", &json!({ "alert_id": 42 })).await;
+        assert!(used.waiting && text.contains("Resolve Atera alert #42 “Disk C: below 5%” on FS01 (Acme)"), "{text}");
+        let (text, used) = crate::tools::run(&core, ctx, "atera_resolve_alert", &json!({ "alert_id": 9 })).await;
+        assert!(!used.ok && text.contains("no open Atera alert #9"), "{text}");
+        let (text, used) = crate::tools::run(&core, ctx, "atera_create_ticket", &json!({ "title": "Clean up FS01", "priority": "high", "alert_id": 42 })).await;
+        assert!(used.waiting && text.contains("Create Atera ticket “Clean up FS01” (High priority) on FS01 (Acme)"), "{text}");
+        let list = db::list_tool_approvals(&core.db.0.lock().unwrap()).unwrap();
+        let args: Value = serde_json::from_str(&list[0].args).unwrap();
+        assert_eq!(args["TicketPriority"], "High");
+        assert!(args["Description"].as_str().unwrap().contains("From Atera alert #42 on FS01 (Acme): Free space 3.1 GB"));
+        assert!(args.get("EndUserEmail").is_none());
+        let (text, _) = crate::tools::run(&core, ctx, "atera_create_ticket", &json!({ "title": "x", "end_user_email": "nope" })).await;
+        assert!(text.contains("isn't a list of email addresses"), "{text}");
+        // Nothing has gone to Atera; the alert is still there.
+        assert!(crate::atera::find_alert(&core, 42).is_some());
     }
 
     /// A stand-in model that answers from a script, one reply per call.
