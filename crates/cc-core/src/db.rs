@@ -389,6 +389,23 @@ pub fn set_todo_notes(conn: &Connection, id: i64, notes: &str) -> rusqlite::Resu
     Ok(())
 }
 
+/// `None` clears the due date.
+pub fn set_todo_due(conn: &Connection, id: i64, due_at: Option<&str>) -> rusqlite::Result<()> {
+    conn.execute("UPDATE todos SET due_at = ?1 WHERE id = ?2", params![due_at, id])?;
+    Ok(())
+}
+
+pub fn set_todo_title(conn: &Connection, id: i64, title: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE todos SET title = ?1 WHERE id = ?2", params![title.trim(), id])?;
+    Ok(())
+}
+
+/// `None` takes it out of any project.
+pub fn set_todo_project(conn: &Connection, id: i64, project_id: Option<i64>) -> rusqlite::Result<()> {
+    conn.execute("UPDATE todos SET project_id = ?1 WHERE id = ?2", params![project_id, id])?;
+    Ok(())
+}
+
 /// The email a todo came from, for showing in its details.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct TodoEmail {

@@ -177,6 +177,36 @@ pub(crate) async fn call_data(core: &Arc<Core>, command: &str, a: Value) -> CmdR
             let A { id, notes } = args(a)?;
             ok(db::set_todo_notes(&conn(), id, &notes).map_err(err)?)
         }
+        "set_todo_due" => {
+            #[derive(Deserialize)]
+            struct A {
+                id: i64,
+                due_at: Option<String>,
+            }
+            let A { id, due_at } = args(a)?;
+            ok(db::set_todo_due(&conn(), id, due_at.as_deref().filter(|d| !d.trim().is_empty())).map_err(err)?)
+        }
+        "rename_todo" => {
+            #[derive(Deserialize)]
+            struct A {
+                id: i64,
+                title: String,
+            }
+            let A { id, title } = args(a)?;
+            if title.trim().is_empty() {
+                return Err("A todo needs a title.".into());
+            }
+            ok(db::set_todo_title(&conn(), id, &title).map_err(err)?)
+        }
+        "set_todo_project" => {
+            #[derive(Deserialize)]
+            struct A {
+                id: i64,
+                project_id: Option<i64>,
+            }
+            let A { id, project_id } = args(a)?;
+            ok(db::set_todo_project(&conn(), id, project_id).map_err(err)?)
+        }
         "todo_email" => ok(db::todo_email(&conn(), args::<Id>(a)?.id).map_err(err)?),
         "delete_todo" => ok(db::delete_todo(&conn(), args::<Id>(a)?.id).map_err(err)?),
 
@@ -1022,7 +1052,7 @@ where
                 // Only tools offered for this message run, even if the model knows other names.
                 (format!("Error: {name} isn't available for this message."), None)
             } else {
-                let args = drop_made_up_due(&name, args, asked.input);
+                let args = drop_unasked(&name, args, asked.input);
                 let (r, u) = crate::tools::run(core, asked.ctx, &name, &args).await;
                 (r, Some(u))
             };
@@ -1042,13 +1072,28 @@ fn trustworthy(asked: &str, answer: &str, used: &[crate::tools::Used]) -> bool {
         && !(crate::tools::wants_change(asked) && !crate::tools::changed(used))
 }
 
-/// A small model sometimes gives a new todo a due date nobody asked for. Keep
-/// one only when the message says when.
-fn drop_made_up_due(tool: &str, mut args: Value, said: &str) -> Value {
-    if tool == "add_todo" && !crate::tools::mentions_time(said) {
-        if let Some(o) = args.as_object_mut() {
-            o.remove("due");
+/// A small model fills in fields nobody asked about: a due date on a new todo,
+/// or "normal" priority and empty notes when only the date was to change
+/// (James, 2026-11-02, todo #17). Keep a field only when the message is about it.
+fn drop_unasked(tool: &str, mut args: Value, said: &str) -> Value {
+    let t = said.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
+    let Some(o) = args.as_object_mut() else { return args };
+    let mut drop = |field: &str, keep: bool| {
+        if !keep {
+            o.remove(field);
         }
+    };
+    match tool {
+        "add_todo" => drop("due", crate::tools::mentions_time(said)),
+        "update_todo" => {
+            drop("due", crate::tools::mentions_time(said) || has(&["due", "date", "deadline"]));
+            drop("priority", has(&["priority", "urgent", "important", "high", "low", "normal"]));
+            drop("notes", has(&["note"]));
+            drop("rename_to", has(&["rename", "title", "name", "call it", "reword", "change it to"]));
+            drop("project", has(&["project"]));
+        }
+        _ => {}
     }
     args
 }
@@ -1411,6 +1456,26 @@ mod tests {
         assert!(text.contains("is you"), "{text}");
     }
 
+    #[tokio::test]
+    async fn a_todo_can_be_rescheduled_renamed_and_moved() {
+        let core = core();
+        call(&core, "add_todo", json!({ "todo": { "title": "Veeam PACS Replication", "notes": "check job 3", "priority": 1 } })).await.unwrap();
+        call(&core, "save_project", json!({ "project": { "id": null, "name": "Backups" } })).await.unwrap();
+        let ctx = crate::tools::Ctx::default();
+        let (text, used) = crate::tools::run(&core, ctx, "update_todo", &json!({ "title": "PACS replication", "due": "2030-11-03 16:00" })).await;
+        assert!(used.ok && text.contains("due ") && text.contains("Nothing else"), "{text}");
+        let t = &db::list_todos(&core.db.0.lock().unwrap()).unwrap()[0];
+        let want = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2030, 11, 3, 16, 0, 0).unwrap().with_timezone(&chrono::Utc).to_rfc3339();
+        assert_eq!(t.due_at.as_deref(), Some(want.as_str()));
+        assert_eq!((t.priority, t.notes.as_str()), (1, "check job 3"), "untouched");
+        let (text, _) = crate::tools::run(&core, ctx, "update_todo", &json!({ "title": "PACS", "rename_to": "Veeam PACS replication job", "project": "backups", "due": "none" })).await;
+        assert!(text.contains("renamed") && text.contains("moved to project") && text.contains("cleared"), "{text}");
+        let t = &db::list_todos(&core.db.0.lock().unwrap()).unwrap()[0];
+        assert_eq!((t.title.as_str(), t.due_at.is_none(), t.project_id.is_some()), ("Veeam PACS replication job", true, true));
+        let (text, used) = crate::tools::run(&core, ctx, "update_todo", &json!({ "title": "PACS" })).await;
+        assert!(!used.ok && text.contains("Nothing changed"), "{text}");
+    }
+
     /// A stand-in model that answers from a script, one reply per call.
     fn scripted(replies: Vec<Value>) -> (std::sync::Mutex<Vec<Vec<Value>>>, std::sync::Mutex<std::collections::VecDeque<Value>>) {
         (std::sync::Mutex::new(vec![]), std::sync::Mutex::new(replies.into()))
@@ -1466,10 +1531,17 @@ mod tests {
     #[test]
     fn todos_only_get_a_due_date_when_one_was_said() {
         let a = json!({ "title": "approval test", "priority": "low", "due": "2026-11-01 23:06" });
-        assert!(drop_made_up_due("add_todo", a.clone(), "Add a todo: approval test, low priority").get("due").is_none());
-        assert!(drop_made_up_due("add_todo", a.clone(), "add a todo to call Dell by Friday").get("due").is_some());
-        assert!(drop_made_up_due("add_todo", a.clone(), "todo: renew cert, due 11/15").get("due").is_some());
-        assert!(drop_made_up_due("add_reminder", a, "remind me").get("due").is_some());
+        assert!(drop_unasked("add_todo", a.clone(), "Add a todo: approval test, low priority").get("due").is_none());
+        assert!(drop_unasked("add_todo", a.clone(), "add a todo to call Dell by Friday").get("due").is_some());
+        assert!(drop_unasked("add_todo", a.clone(), "todo: renew cert, due 11/15").get("due").is_some());
+        assert!(drop_unasked("add_reminder", a, "remind me").get("due").is_some());
+        // What the model sent for "change the due date ... to tomorrow at 4pm" (run 42).
+        let sent = json!({ "title": "PACS Replication", "priority": "normal", "notes": "", "due": "2026-11-03T16:00" });
+        let kept = drop_unasked("update_todo", sent, "Change the due date for the PACS Replication Todo to tomorrow at 4pm");
+        assert_eq!(kept, json!({ "title": "PACS Replication", "due": "2026-11-03T16:00" }));
+        let kept = drop_unasked("update_todo", json!({ "id": 3, "priority": "high", "notes": "call first" }), "make #3 high priority and add a note: call first");
+        assert_eq!(kept["priority"], "high");
+        assert_eq!(kept["notes"], "call first");
     }
 
     #[test]
