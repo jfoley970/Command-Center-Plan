@@ -49,3 +49,18 @@ export function nextBusinessClose(now = new Date()): Date {
 export function isDueNow(iso: string | null): boolean {
   return !!iso && (isToday(iso) || new Date(iso).getTime() <= nextBusinessClose().getTime());
 }
+
+/** How many days ahead the Todos widget's "Next 3 days" tab looks (James, 2026-11-02). */
+export const SOON_DAYS = 3;
+
+/**
+ * Due now (see isDueNow), overdue, or due before the end of the day SOON_DAYS
+ * from today. On a Monday that covers through Thursday night.
+ */
+export function isDueSoon(iso: string | null, now = new Date()): boolean {
+  if (!iso) return false;
+  const end = new Date(now);
+  end.setDate(end.getDate() + SOON_DAYS);
+  end.setHours(23, 59, 59, 999);
+  return isDueNow(iso) || new Date(iso).getTime() <= end.getTime();
+}

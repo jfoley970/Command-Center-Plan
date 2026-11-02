@@ -2,7 +2,7 @@ import { useState, type CSSProperties, type FormEvent, type ReactElement } from 
 import { api, type Project, type Todo } from "../api";
 import { useData } from "../data";
 import { buildProjectTree, type ProjectNode } from "../projectTree";
-import { isDueNow, isOverdue } from "../time";
+import { isDueSoon, isOverdue } from "../time";
 import TodoDetail from "./TodoDetail";
 import TodoDue from "./TodoDue";
 import Widget from "./Widget";
@@ -11,7 +11,7 @@ export type TodoFilter = "open" | "today" | "overdue" | "done";
 
 const TABS: { id: TodoFilter; label: string }[] = [
   { id: "open", label: "Open" },
-  { id: "today", label: "Today" },
+  { id: "today", label: "Next 3 days" },
   { id: "overdue", label: "Overdue" },
   { id: "done", label: "Done" },
 ];
@@ -62,7 +62,7 @@ export function applyFilter(todos: Todo[], f: TodoFilter): Todo[] {
     case "open":
       return todos.filter((t) => !t.done);
     case "today":
-      return todos.filter((t) => !t.done && isDueNow(t.due_at));
+      return todos.filter((t) => !t.done && isDueSoon(t.due_at));
     case "overdue":
       return todos.filter((t) => !t.done && isOverdue(t.due_at));
     case "done":
