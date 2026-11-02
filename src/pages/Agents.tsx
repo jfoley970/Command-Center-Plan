@@ -4,6 +4,7 @@ import { api, type Agent, type AgentMemory, type AgentRun, type ProviderId } fro
 import { useData } from "../data";
 import { formatWhen } from "../time";
 import { listen, openUrl } from "../transport";
+import { ToolsUsed } from "../widgets/ToolsUsed";
 
 type Draft = Pick<Agent, "name" | "description" | "system_prompt" | "model" | "provider" | "repo" | "include_context" | "memory"> & { id?: number };
 
@@ -247,7 +248,10 @@ function AgentChat({ agent, onEdit, onDelete }: { agent: Agent; onEdit: () => vo
                 {r.status === "running" ? (
                   <div className="thinking" aria-label="Working"><span /><span /><span /></div>
                 ) : (
-                  <div className="bubble-text">{r.output}</div>
+                  <>
+                    <div className="bubble-text">{r.output}</div>
+                    <ToolsUsed tools={r.tools} />
+                  </>
                 )}
                 {r.link && (
                   <button className="ghost small" onClick={() => openUrl(r.link)}>

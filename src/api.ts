@@ -172,7 +172,11 @@ export type AgentRun = {
   external_id: string | null;
   /** Where the request came from: the app, or a Pocket voice command. */
   source: "app" | "pocket" | "voice";
+  /** The tools Local AI used for this answer, in order. */
+  tools?: ToolUsed[];
 };
+
+export type ToolUsed = { tool: string; label: string; ok: boolean };
 
 export type CursorMessage = { from: "you" | "cursor"; text: string };
 

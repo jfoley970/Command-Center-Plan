@@ -119,6 +119,68 @@ pub async fn complete(model: &str, system: &str, history: &History, user: &str) 
     Ok(parse_chat(&v))
 }
 
+/// One step of a chat that can call tools: Ollama's answer message (which may
+/// hold `tool_calls` instead of text) plus its token counts. Thinking is off, so
+/// each step of a tool loop stays quick on a small GPU.
+pub async fn chat_step(model: &str, messages: &[Value], tools: &[Value]) -> Result<(Value, Completion), String> {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "think": false,
+        "options": { "num_ctx": num_ctx() },
+    });
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/chat", url()))
+        .timeout(Duration::from_secs(900))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach Ollama at {}: {e}", url()))?;
+    let status = resp.status();
+    let v: Value = resp.json().await.map_err(|e| format!("Unexpected answer from Ollama: {e}"))?;
+    if !status.is_success() {
+        let msg = v["error"].as_str().unwrap_or("unknown error");
+        return Err(match status.as_u16() {
+            404 => format!("{model} isn't pulled into Ollama. Pull it, or pick another model for this agent."),
+            code => format!("Ollama error {code}: {msg}"),
+        });
+    }
+    let completion = parse_chat(&v);
+    Ok((v["message"].clone(), completion))
+}
+
+/// The tool calls in an answer message, as (name, arguments). Arguments that
+/// arrive as a JSON string are parsed.
+pub fn tool_calls(message: &Value) -> Vec<(String, Value)> {
+    message["tool_calls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let f = &c["function"];
+            let name = f["name"].as_str()?.to_string();
+            let args = match &f["arguments"] {
+                Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
+                other => other.clone(),
+            };
+            Some((name, if args.is_object() { args } else { json!({}) }))
+        })
+        .collect()
+}
+
+/// Resolves an empty model name to the first model pulled.
+pub async fn pick_model(model: &str) -> Result<String, String> {
+    if model.trim().is_empty() {
+        models().await?.into_iter().next().map(|m| m.0).ok_or_else(|| "No local models yet. Pull one into Ollama first.".to_string())
+    } else {
+        Ok(model.to_string())
+    }
+}
+
 /// A short answer shaped by a JSON schema (Ollama's structured outputs), for
 /// background jobs such as reading voice commands. Gives up after `timeout`.
 pub async fn complete_json(model: &str, system: &str, user: &str, schema: Value, timeout: Duration) -> Result<Value, String> {
@@ -196,6 +258,22 @@ mod tests {
         assert_eq!(body["stream"], false);
         assert_eq!(body["messages"][1]["content"], "hi");
         assert_eq!(body["options"]["num_ctx"], 8192);
+    }
+
+    #[test]
+    fn tool_calls_are_read() {
+        let m = json!({ "role": "assistant", "content": "", "tool_calls": [
+            { "function": { "name": "add_todo", "arguments": { "title": "Call Dell" } } },
+            { "function": { "name": "list_todos", "arguments": "{\"include_done\": true}" } },
+            { "function": { "name": "overview", "arguments": null } },
+            { "function": {} },
+        ]});
+        let calls = tool_calls(&m);
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0], ("add_todo".into(), json!({ "title": "Call Dell" })));
+        assert_eq!(calls[1].1["include_done"], true);
+        assert_eq!(calls[2].1, json!({}));
+        assert!(tool_calls(&json!({ "content": "hi" })).is_empty());
     }
 
     #[test]

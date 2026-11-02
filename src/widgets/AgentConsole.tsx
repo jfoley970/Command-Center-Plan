@@ -8,6 +8,7 @@ import { openUrl } from "../transport";
 import { useRecorder, voice, type VoiceStatus } from "../voice";
 import CursorRun from "./CursorRun";
 import Widget from "./Widget";
+import { ToolsUsed } from "./ToolsUsed";
 
 const MIC_BIG = (
   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -277,7 +278,10 @@ export default function AgentConsole({ agentId, setAgentId, onOpenAgents, onOpen
                   )}
                 </>
               ) : (
-                <div className="run-output">{run.output}</div>
+                <>
+                  <div className="run-output">{run.output}</div>
+                  <ToolsUsed tools={run.tools} />
+                </>
               )}
               {run.link && (
                 <div>
