@@ -230,6 +230,7 @@ function AgentChat({ agent, onEdit, onDelete }: { agent: Agent; onEdit: () => vo
                   <div className="bubble-text">{r.input}</div>
                   <div className="bubble-meta">
                     {r.source === "pocket" && <span className="via-pocket" title="Said to Pocket">{MIC} Pocket</span>}
+                    {r.source === "voice" && <span className="via-pocket" title="Said to the mic">{MIC} Voice</span>}
                     {formatWhen(r.started_at)}
                   </div>
                 </div>

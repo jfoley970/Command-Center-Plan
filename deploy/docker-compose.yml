@@ -40,6 +40,8 @@ services:
       CC_SECRET_KEY_FILE: /run/secrets/cc-secret-key
       # Local AI. Harmless when Ollama isn't running: the Local AI card says so.
       CC_OLLAMA_URL: http://ollama:11434
+      # Push-to-talk. Harmless when Whisper isn't running: the Voice card says so.
+      CC_WHISPER_URL: http://whisper:9000
       TZ: ${TZ}
     secrets:
       - cc-secret-key
@@ -67,6 +69,25 @@ services:
     expose:
       - "11434"
 
+  # Speech to text for the dashboard's mic button. Starts with Ollama
+  # (COMPOSE_PROFILES=llm) and, like it, is reached only by cc-server.
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:v1.10.0-gpu
+    profiles: ["llm"]
+    restart: unless-stopped
+    environment:
+      ASR_ENGINE: faster_whisper
+      # "small" is about 1 GB of GPU memory in float16, so it fits beside an
+      # 8B model on an 8 GB card. "base" is lighter, "medium" more accurate.
+      ASR_MODEL: small
+      ASR_QUANTIZATION: float16
+      # Give the GPU memory back to Ollama after 10 quiet minutes.
+      MODEL_IDLE_TIMEOUT: 600
+    volumes:
+      - whisper:/root/.cache
+    expose:
+      - "9000"
+
 secrets:
   cc-secret-key:
     file: ./secrets/cc-secret-key
@@ -75,3 +96,4 @@ volumes:
   caddy-data:
   cc-data:
   ollama:
+  whisper:

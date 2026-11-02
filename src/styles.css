@@ -293,6 +293,11 @@ button.danger { color: var(--p1); }
 .ai-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 0.78rem; padding: 0.2rem 0.65rem; border-radius: 999px; color: var(--text-2); }
 .ai-chip.active { color: var(--text); border-color: var(--accent); background: rgba(var(--accent-rgb), 0.12); }
 .console-input input { flex: 1; min-width: 0; }
+.console-input .mic { display: inline-flex; align-items: center; justify-content: center; padding: 0 10px; }
+.console-input .mic.recording { color: var(--p1); border-color: var(--p1); animation: mic-glow 1.2s infinite ease-in-out; }
+@keyframes mic-glow { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 10px 1px var(--p1); } }
+@media (prefers-reduced-motion: reduce) { .console-input .mic.recording { animation: none; } }
+.heard { margin-bottom: 6px; }
 .console-output { flex: 1; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-height: 60px; }
 .run-output { white-space: pre-wrap; line-height: 1.5; }
 .history { display: flex; gap: 4px; flex-wrap: wrap; }
