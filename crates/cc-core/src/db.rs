@@ -239,7 +239,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
     // Background runs (Cursor) keep the remote agent's id until they finish.
     // `source` says where the request came from: app | pocket.
-    for (column, def) in [("external_id", "TEXT"), ("link", "TEXT NOT NULL DEFAULT ''"), ("source", "TEXT NOT NULL DEFAULT 'app'")] {
+    // `tools`: JSON list of the tools Local AI used for this answer (tools::Used).
+    for (column, def) in [
+        ("external_id", "TEXT"),
+        ("link", "TEXT NOT NULL DEFAULT ''"),
+        ("source", "TEXT NOT NULL DEFAULT 'app'"),
+        ("tools", "TEXT NOT NULL DEFAULT '[]'"),
+    ] {
         if !has_column(conn, "agent_runs", column)? {
             conn.execute_batch(&format!("ALTER TABLE agent_runs ADD COLUMN {column} {def}"))?;
         }
@@ -1410,6 +1416,8 @@ pub struct AgentRun {
     pub external_id: Option<String>,
     /// Where the request came from: "app" or "pocket".
     pub source: String,
+    /// The tools Local AI used for this answer, in order.
+    pub tools: Vec<crate::tools::Used>,
 }
 
 pub fn start_run(conn: &Connection, agent_id: i64, input: &str, source: &str) -> rusqlite::Result<i64> {
@@ -1436,7 +1444,14 @@ pub fn finish_run(
     Ok(())
 }
 
-const RUN_COLS: &str = "r.id, r.agent_id, a.name, a.provider, r.input, r.output, r.status, r.model, r.input_tokens, r.output_tokens, r.started_at, r.finished_at, r.link, r.external_id, r.source";
+/// Records which tools an answer used.
+pub fn set_run_tools(conn: &Connection, run_id: i64, tools: &[crate::tools::Used]) -> rusqlite::Result<()> {
+    let json = serde_json::to_string(tools).unwrap_or_else(|_| "[]".into());
+    conn.execute("UPDATE agent_runs SET tools = ?1 WHERE id = ?2", params![json, run_id])?;
+    Ok(())
+}
+
+const RUN_COLS: &str = "r.id, r.agent_id, a.name, a.provider, r.input, r.output, r.status, r.model, r.input_tokens, r.output_tokens, r.started_at, r.finished_at, r.link, r.external_id, r.source, r.tools";
 
 pub fn list_runs(conn: &Connection, agent_id: Option<i64>, limit: i64) -> rusqlite::Result<Vec<AgentRun>> {
     let mut stmt = conn.prepare(&format!(
@@ -1474,6 +1489,7 @@ fn run_from_row(r: &Row) -> rusqlite::Result<AgentRun> {
             link: r.get(12)?,
             external_id: r.get(13)?,
             source: r.get(14)?,
+            tools: serde_json::from_str(&r.get::<_, String>(15)?).unwrap_or_default(),
         })
 }
 

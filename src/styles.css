@@ -334,6 +334,10 @@ button.danger { color: var(--p1); }
 .bubble-text { white-space: pre-wrap; line-height: 1.5; overflow-wrap: anywhere; }
 .bubble-meta { font-size: 0.72rem; color: var(--muted); display: flex; gap: 0.5rem; align-items: center; justify-content: flex-end; }
 .bubble.bot .bubble-meta { justify-content: flex-start; }
+.tools-used { list-style: none; margin: 0.35rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.3rem; font-family: var(--font-data); font-size: 0.72rem; }
+.tools-used li { color: var(--text-2); border: 1px solid var(--border); background: var(--panel-2); padding: 1px 6px; border-radius: var(--radius); }
+.tools-used li::before { content: "› "; color: var(--accent); }
+.tools-used li.failed { color: var(--critical); border-color: var(--critical); background: var(--critical-bg); }
 .via-pocket { display: inline-flex; align-items: center; gap: 3px; color: var(--warning); }
 .chat-reply { display: flex; gap: 0.5rem; align-items: flex-end; }
 .chat-reply textarea { flex: 1; min-width: 0; resize: vertical; }

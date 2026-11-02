@@ -15,6 +15,7 @@ pub mod pocket;
 pub mod pomodoro;
 pub mod providers;
 pub mod secrets;
+pub mod tools;
 pub mod transfer;
 pub mod unifi;
 pub mod voice;

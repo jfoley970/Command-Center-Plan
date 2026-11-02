@@ -64,6 +64,75 @@ struct MailSetup {
 
 /// Runs one named command with JSON arguments and returns its JSON result.
 pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value> {
+    match command {
+        // Commands that can run agents (directly, or through Pocket and voice).
+        "run_agent" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                agent_id: i64,
+                input: String,
+            }
+            let A { agent_id, input } = args(a)?;
+            ok(run_agent(core, agent_id, input, "app").await?)
+        }
+        "ask_provider" => {
+            #[derive(Deserialize)]
+            struct A {
+                provider: String,
+                input: String,
+            }
+            let A { provider, input } = args(a)?;
+            ok(ask_provider(core, &provider, input, "app").await?)
+        }
+        "voice_command" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct A {
+                audio: String,
+                #[serde(default)]
+                mime: String,
+                #[serde(default)]
+                agent_id: Option<i64>,
+                #[serde(default)]
+                provider: Option<String>,
+            }
+            let A { audio, mime, agent_id, provider } = args(a)?;
+            ok(crate::voice::handle_audio(core, &audio, &mime, crate::voice::Fallback { agent_id, provider }).await?)
+        }
+        "pocket_refresh" => ok(pocket::refresh(core).await?),
+        "pocket_set_key" => {
+            let key = args::<Key>(a)?.key;
+            core.secrets.set(crate::secrets::POCKET_KEY, &key)?;
+            if !key.trim().is_empty() {
+                pocket::mark_connected(core)?;
+            }
+            ok(pocket::refresh(core).await?)
+        }
+        "pocket_run" => {
+            #[derive(Deserialize)]
+            struct A {
+                id: i64,
+                #[serde(default)]
+                edit: Option<pocket::Edit>,
+            }
+            let A { id, edit } = args(a)?;
+            ok(pocket::run(core, id, edit).await?)
+        }
+        "import_connectors" => {
+            #[derive(Deserialize)]
+            struct A {
+                connectors: Vec<transfer::ConnectorBundle>,
+            }
+            ok(transfer::import(core, args::<A>(a)?.connectors).await?)
+        }
+        _ => call_data(core, command, a).await,
+    }
+}
+
+/// Commands that don't run agents, which is what Local AI's tools call (so a
+/// tool can never start another agent run).
+pub(crate) async fn call_data(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value> {
     let conn = || core.db.0.lock().unwrap();
     match command {
         // ---------- Todos ----------
@@ -292,16 +361,6 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             let A { agent_id, limit } = args(a)?;
             ok(db::list_runs(&conn(), agent_id, limit.unwrap_or(50)).map_err(err)?)
         }
-        "run_agent" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct A {
-                agent_id: i64,
-                input: String,
-            }
-            let A { agent_id, input } = args(a)?;
-            ok(run_agent(core, agent_id, input, "app").await?)
-        }
         "clear_chat" => {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -378,15 +437,6 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             core.changed("providers-changed");
             ok(())
         }
-        "ask_provider" => {
-            #[derive(Deserialize)]
-            struct A {
-                provider: String,
-                input: String,
-            }
-            let A { provider, input } = args(a)?;
-            ok(ask_provider(core, &provider, input, "app").await?)
-        }
 
         // ---------- Atera ----------
         "atera_alerts" => ok(core.atera.snapshot(&core.secrets)?),
@@ -428,33 +478,9 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
 
         // ---------- Push-to-talk ----------
         "voice_status" => ok(crate::whisper::status().await),
-        "voice_command" => {
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct A {
-                audio: String,
-                #[serde(default)]
-                mime: String,
-                #[serde(default)]
-                agent_id: Option<i64>,
-                #[serde(default)]
-                provider: Option<String>,
-            }
-            let A { audio, mime, agent_id, provider } = args(a)?;
-            ok(crate::voice::handle_audio(core, &audio, &mime, crate::voice::Fallback { agent_id, provider }).await?)
-        }
 
         // ---------- Pocket recorder ----------
         "pocket_status" => ok(core.pocket.snapshot(core)?),
-        "pocket_refresh" => ok(pocket::refresh(core).await?),
-        "pocket_set_key" => {
-            let key = args::<Key>(a)?.key;
-            core.secrets.set(crate::secrets::POCKET_KEY, &key)?;
-            if !key.trim().is_empty() {
-                pocket::mark_connected(core)?;
-            }
-            ok(pocket::refresh(core).await?)
-        }
         "pocket_set_webhook_secret" => {
             let key = args::<Key>(a)?.key;
             core.secrets.set(crate::secrets::POCKET_WEBHOOK_SECRET, &key)?;
@@ -486,28 +512,11 @@ pub async fn call(core: &Arc<Core>, command: &str, a: Value) -> CmdResult<Value>
             pocket::set_triggers(core, args::<A>(a)?.triggers)?;
             ok(core.pocket.snapshot(core)?)
         }
-        "pocket_run" => {
-            #[derive(Deserialize)]
-            struct A {
-                id: i64,
-                #[serde(default)]
-                edit: Option<pocket::Edit>,
-            }
-            let A { id, edit } = args(a)?;
-            ok(pocket::run(core, id, edit).await?)
-        }
         "pocket_dismiss" => ok(pocket::dismiss(core, args::<Id>(a)?.id)?),
 
         // ---------- Connectors moving between Command Centers ----------
         // There is deliberately no export command: keys never leave over the API.
         "connector_summary" => ok(transfer::summary(core)?),
-        "import_connectors" => {
-            #[derive(Deserialize)]
-            struct A {
-                connectors: Vec<transfer::ConnectorBundle>,
-            }
-            ok(transfer::import(core, args::<A>(a)?.connectors).await?)
-        }
 
         // ---------- Layout and other view preferences ----------
         // Kept with the data rather than in the browser, so the desktop app and
@@ -655,8 +664,13 @@ fn agent_system(agent: &db::Agent, others: &[db::Agent], facts: &[String]) -> St
         .collect();
     if !names.is_empty() {
         note.push_str(&format!(
-            " The other agents are: {}. You can't see their chats or message them; the user talks to each one by name.",
-            names.join(", ")
+            " The other agents are: {}. {}",
+            names.join(", "),
+            if agent.provider == "local" && tools_on() {
+                "You can read what they were asked and answered recently with a tool, but you can't message them yet; the user talks to each one by name."
+            } else {
+                "You can't see their chats or message them; the user talks to each one by name."
+            }
         ));
     }
     if !facts.is_empty() {
@@ -734,6 +748,18 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
     let result = match provider.id {
         "chatgpt" => openai::chatgpt(&api_key, &agent.model, &system, &history, &user).await,
         "grok" => openai::grok(&api_key, &agent.model, &system, &history, &user).await,
+        "local" if tools_on() => {
+            let recent = history.iter().rev().take(2).map(|(q, a)| format!("{q} {a}")).collect::<Vec<_>>().join(" ");
+            let picked = crate::tools::pick(input.trim(), &recent);
+            let system = format!("{system}\n\n{}", crate::tools::system_note(chrono::Local::now()));
+            match local_with_tools(core, &agent.model, &system, &history, &user, &picked).await {
+                Ok((c, used)) => {
+                    db::set_run_tools(&core.db.0.lock().unwrap(), run_id, &used).map_err(err)?;
+                    Ok(c)
+                }
+                Err(e) => Err(e),
+            }
+        }
         "local" => ollama::complete(&agent.model, &system, &history, &user).await,
         _ => claude::complete(&api_key, &agent.model, &system, &history, &user).await,
     };
@@ -760,6 +786,87 @@ pub(crate) async fn run_agent(core: &Arc<Core>, agent_id: i64, input: String, so
         });
     }
     Ok(run)
+}
+
+/// Local AI uses tools unless `CC_LOCAL_TOOLS=0` turns them off.
+fn tools_on() -> bool {
+    std::env::var("CC_LOCAL_TOOLS").ok().is_none_or(|v| v.trim() != "0")
+}
+
+/// How many times one message may go back and forth with tools before the
+/// model has to answer with what it has.
+const TOOL_ROUNDS: usize = 5;
+/// At most this many tool calls in one round, so a confused model can't fan out.
+const TOOL_CALLS_PER_ROUND: usize = 6;
+
+/// A Local AI answer that may call tools first. Returns the answer and the
+/// tools it used, in order.
+async fn local_with_tools(
+    core: &Arc<Core>,
+    model: &str,
+    system: &str,
+    history: &claude::History,
+    user: &str,
+    picked: &[&'static crate::tools::Tool],
+) -> CmdResult<(claude::Completion, Vec<crate::tools::Used>)> {
+    let model = ollama::pick_model(model).await?;
+    let step = |messages: Vec<Value>, tools: Vec<Value>| {
+        let model = model.clone();
+        async move { ollama::chat_step(&model, &messages, &tools).await }
+    };
+    tool_loop(core, system, history, user, picked, step).await
+}
+
+/// The back-and-forth behind `local_with_tools`; `step` asks the model once.
+async fn tool_loop<F, Fut>(
+    core: &Arc<Core>,
+    system: &str,
+    history: &claude::History,
+    user: &str,
+    picked: &[&'static crate::tools::Tool],
+    step: F,
+) -> CmdResult<(claude::Completion, Vec<crate::tools::Used>)>
+where
+    F: Fn(Vec<Value>, Vec<Value>) -> Fut,
+    Fut: std::future::Future<Output = Result<(Value, claude::Completion), String>>,
+{
+    let schema = crate::tools::schema(picked);
+    let mut messages = vec![serde_json::json!({ "role": "system", "content": system })];
+    messages.extend(claude::messages(history, user));
+    let mut used = vec![];
+    let (mut input_tokens, mut output_tokens) = (0, 0);
+    for round in 0..=TOOL_ROUNDS {
+        // The last round offers no tools, so the model has to answer.
+        let offer: Vec<Value> = if round == TOOL_ROUNDS { vec![] } else { schema.clone() };
+        let no_tools = offer.is_empty();
+        let (message, c) = step(messages.clone(), offer).await?;
+        input_tokens += c.input_tokens;
+        output_tokens += c.output_tokens;
+        let calls = ollama::tool_calls(&message);
+        if calls.is_empty() || no_tools {
+            let text = if c.text.is_empty() && !used.is_empty() { "Done.".to_string() } else { c.text };
+            return Ok((claude::Completion { text, input_tokens, output_tokens, ..c }, used));
+        }
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": message["content"].as_str().unwrap_or_default(),
+            "tool_calls": message["tool_calls"].clone(),
+        }));
+        for (i, (name, args)) in calls.into_iter().enumerate() {
+            let (result, u) = if i >= TOOL_CALLS_PER_ROUND {
+                ("Error: too many tool calls at once; use fewer.".to_string(), None)
+            } else if !picked.iter().any(|t| t.name == name) {
+                // Only tools offered for this message run, even if the model knows other names.
+                (format!("Error: {name} isn't available for this message."), None)
+            } else {
+                let (r, u) = crate::tools::run(core, &name, &args).await;
+                (r, Some(u))
+            };
+            used.extend(u);
+            messages.push(serde_json::json!({ "role": "tool", "tool_name": name, "content": result }));
+        }
+    }
+    Err("Local AI kept calling tools without answering.".into())
 }
 
 const LEARN_SYSTEM: &str = "You keep an AI assistant's long-term memory: a short list of lasting facts about its user. \
@@ -943,6 +1050,74 @@ mod tests {
         assert_eq!(call(&core, "list_memories", json!({ "agentId": id })).await.unwrap()[0]["fact"], "Two.");
         call(&core, "clear_memories", json!({ "agentId": id })).await.unwrap();
         assert_eq!(call(&core, "list_memories", json!({ "agentId": id })).await.unwrap(), json!([]));
+    }
+
+    #[tokio::test]
+    async fn local_ai_uses_tools_then_answers() {
+        let core = core();
+        let picked = crate::tools::pick("add a todo to call Dell", "");
+        let seen = std::sync::Mutex::new(vec![]);
+        let step = |messages: Vec<Value>, tools: Vec<Value>| {
+            seen.lock().unwrap().push((messages, tools.len()));
+            let round = seen.lock().unwrap().len();
+            let c = |text: &str| claude::Completion { text: text.into(), stop_reason: "end_turn".into(), model: "qwen3:8b".into(), input_tokens: 10, output_tokens: 2 };
+            let out = match round {
+                // A tool it wasn't offered is refused; a good one runs.
+                1 => (json!({ "role": "assistant", "content": "", "tool_calls": [
+                    { "function": { "name": "atera_alerts", "arguments": {} } },
+                    { "function": { "name": "add_todo", "arguments": { "title": "Call Dell", "priority": "high" } } }
+                ]}), c("")),
+                _ => (json!({ "role": "assistant", "content": "Added it." }), c("Added it.")),
+            };
+            async move { Ok(out) }
+        };
+        let (answer, used) = tool_loop(&core, "sys", &[], "add a todo to call Dell", &picked, step).await.unwrap();
+        assert_eq!((answer.text.as_str(), answer.input_tokens), ("Added it.", 20));
+        assert_eq!(used.len(), 1);
+        assert_eq!(used[0].label, "Added todo “Call Dell”");
+        let todos = db::list_todos(&core.db.0.lock().unwrap()).unwrap();
+        assert_eq!((todos[0].title.as_str(), todos[0].priority), ("Call Dell", 1));
+        let seen = seen.lock().unwrap();
+        let tool_msgs: Vec<&Value> = seen[1].0.iter().filter(|m| m["role"] == "tool").collect();
+        assert!(tool_msgs[0]["content"].as_str().unwrap().contains("isn't available"));
+        assert!(tool_msgs[1]["content"].as_str().unwrap().starts_with("Added todo #"));
+        assert!(seen[0].1 > 0);
+    }
+
+    #[tokio::test]
+    async fn tool_loop_stops_offering_tools_after_five_rounds() {
+        let core = core();
+        let picked = crate::tools::pick("todos", "");
+        let rounds = std::sync::Mutex::new(vec![]);
+        let step = |_: Vec<Value>, tools: Vec<Value>| {
+            rounds.lock().unwrap().push(tools.len());
+            let c = claude::Completion { text: String::new(), stop_reason: "end_turn".into(), model: String::new(), input_tokens: 0, output_tokens: 0 };
+            let msg = if tools.is_empty() {
+                json!({ "content": "Here you go." })
+            } else {
+                json!({ "content": "", "tool_calls": [{ "function": { "name": "list_todos", "arguments": {} } }] })
+            };
+            let c = claude::Completion { text: msg["content"].as_str().unwrap().into(), ..c };
+            async move { Ok((msg, c)) }
+        };
+        let (answer, used) = tool_loop(&core, "sys", &[], "todos", &picked, step).await.unwrap();
+        assert_eq!(answer.text, "Here you go.");
+        assert_eq!(used.len(), TOOL_ROUNDS);
+        let r = rounds.lock().unwrap();
+        assert_eq!(r.len(), TOOL_ROUNDS + 1);
+        assert_eq!(*r.last().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn runs_keep_the_tools_they_used() {
+        let core = core();
+        let c = core.db.0.lock().unwrap();
+        let agent = db::save_agent(&c, serde_json::from_value(json!({ "name": "Local AI", "model": "", "provider": "local", "system_prompt": "Be brief." })).unwrap()).unwrap();
+        let run = db::start_run(&c, agent.id, "hi", "app").unwrap();
+        assert!(db::get_run(&c, run).unwrap().unwrap().tools.is_empty());
+        let used = vec![crate::tools::Used { tool: "add_todo".into(), label: "Added todo “X”".into(), ok: true }];
+        db::set_run_tools(&c, run, &used).unwrap();
+        assert_eq!(db::get_run(&c, run).unwrap().unwrap().tools, used);
     }
 
     #[test]
